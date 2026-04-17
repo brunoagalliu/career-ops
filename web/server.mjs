@@ -403,7 +403,7 @@ app.get('/api/debug/claude-test', async (req, res) => {
   if (!user?.apiKey) return res.json({ error: 'no user or api key found' })
   ensureWorkspace(user.id)
   const ws = getWorkspace(user.id)
-  const env = { ...process.env, ANTHROPIC_API_KEY: user.apiKey, NO_COLOR: '1', TERM: 'dumb' }
+  const env = { ...process.env, ANTHROPIC_API_KEY: user.apiKey, NO_COLOR: '1', TERM: 'dumb', HOME: '/app' }
   const prompt = 'Say the word hello and nothing else.'
 
   // Test 1: execFile plain text
@@ -668,7 +668,7 @@ function makeJobEndpoints(name, buildPrompt, model = 'claude-sonnet-4-5', snapsh
 
       const job = spawn('claude', ['-p', prompt, '--dangerously-skip-permissions', '--model', model, '--output-format', 'stream-json'], {
         cwd: ws,
-        env: { ...process.env, ANTHROPIC_API_KEY: req.user.apiKey, NO_COLOR: '1', TERM: 'dumb' },
+        env: { ...process.env, ANTHROPIC_API_KEY: req.user.apiKey, NO_COLOR: '1', TERM: 'dumb', HOME: '/app' },
         stdio: ['ignore', 'pipe', 'pipe'],
       })
       state.job = job
