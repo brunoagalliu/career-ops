@@ -143,25 +143,33 @@ async function migrateExistingData(userId) {
   // data files
   for (const f of ['applications.md', 'pipeline.md', 'scan-history.tsv']) {
     const src = path.join(ROOT, 'data', f)
-    if (fs.existsSync(src)) {
-      const content = fs.readFileSync(src, 'utf8')
-      await saveFile(userId, `data/${f}`, content)
-    }
+    if (fs.existsSync(src)) await saveFile(userId, `data/${f}`, fs.readFileSync(src, 'utf8'))
   }
-  // profile
+  // profile + portals
   const ps = path.join(ROOT, 'config', 'profile.yml')
   if (fs.existsSync(ps)) await setProfileYml(userId, fs.readFileSync(ps, 'utf8'))
-  // portals
   const portals = path.join(ROOT, 'portals.yml')
   if (fs.existsSync(portals)) await setPortalsYml(userId, fs.readFileSync(portals, 'utf8'))
   // modes/_profile.md
   const ms = path.join(ROOT, 'modes', '_profile.md')
   if (fs.existsSync(ms)) await saveFile(userId, 'modes/_profile.md', fs.readFileSync(ms, 'utf8'))
+  // cv + article-digest
+  for (const f of ['cv.md', 'article-digest.md']) {
+    const src = path.join(ROOT, f)
+    if (fs.existsSync(src)) await saveFile(userId, f, fs.readFileSync(src, 'utf8'))
+  }
   // reports
   const rs = path.join(ROOT, 'reports')
   if (fs.existsSync(rs)) {
     for (const f of fs.readdirSync(rs)) {
       if (f.endsWith('.md')) await saveFile(userId, `reports/${f}`, fs.readFileSync(path.join(rs, f), 'utf8'))
+    }
+  }
+  // interview-prep
+  const ip = path.join(ROOT, 'interview-prep')
+  if (fs.existsSync(ip)) {
+    for (const f of fs.readdirSync(ip)) {
+      if (f.endsWith('.md')) await saveFile(userId, `interview-prep/${f}`, fs.readFileSync(path.join(ip, f), 'utf8'))
     }
   }
 }
@@ -184,11 +192,14 @@ async function syncDbToWorkspace(userId) {
 // Read workspace files back to DB (after claude job)
 async function syncWorkspaceToDb(userId) {
   const ws = getWorkspace(userId)
-  const TRACKED = ['data/applications.md', 'data/pipeline.md', 'data/scan-history.tsv']
+  const TRACKED = [
+    'data/applications.md', 'data/pipeline.md', 'data/scan-history.tsv',
+    'cv.md', 'article-digest.md',
+  ]
   for (const rel of TRACKED) {
     try { await saveFile(userId, rel, fs.readFileSync(path.join(ws, rel), 'utf8')) } catch {}
   }
-  for (const dir of ['reports', path.join('batch', 'tracker-additions')]) {
+  for (const dir of ['reports', path.join('batch', 'tracker-additions'), 'interview-prep']) {
     const full = path.join(ws, dir)
     if (!fs.existsSync(full)) continue
     for (const f of fs.readdirSync(full)) {
@@ -478,6 +489,22 @@ app.put('/api/portals', requireAuth, async (req, res) => {
     await setPortalsYml(req.user.id, content)
     res.json({ ok: true })
   } catch (e) { res.status(400).json({ error: e.message }) }
+})
+
+app.get('/api/cv', requireAuth, async (req, res) => {
+  try {
+    const content = await getFile(req.user.id, 'cv.md')
+    res.json({ content: content ?? '' })
+  } catch (e) { res.status(500).json({ error: e.message }) }
+})
+
+app.put('/api/cv', requireAuth, async (req, res) => {
+  const { content } = req.body
+  if (typeof content !== 'string') return res.status(400).json({ error: 'content is required' })
+  try {
+    await saveFile(req.user.id, 'cv.md', content)
+    res.json({ ok: true })
+  } catch (e) { res.status(500).json({ error: e.message }) }
 })
 
 const ALLOWED_SCRIPTS = ['merge-tracker', 'verify-pipeline', 'normalize-statuses', 'dedup-tracker']
