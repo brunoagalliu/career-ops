@@ -406,7 +406,7 @@ app.get('/api/debug/claude-test', async (req, res) => {
   const ws = getWorkspace(user.id)
   const job = spawn('claude', ['-p', '--dangerously-skip-permissions', '--model', 'claude-haiku-4-5-20251001', '--output-format', 'stream-json'], {
     cwd: ws,
-    env: { ...process.env, ANTHROPIC_API_KEY: req.user.apiKey, NO_COLOR: '1', TERM: 'dumb' },
+    env: { ...process.env, ANTHROPIC_API_KEY: user.apiKey, NO_COLOR: '1', TERM: 'dumb' },
     stdio: ['pipe', 'pipe', 'pipe'],
   })
   let stdout = '', stderr = ''
