@@ -49,9 +49,116 @@ function Select({ value, onChange, options }) {
       className="bg-zinc-800 border border-zinc-700 rounded px-3 py-1.5 text-sm text-zinc-200 focus:outline-none focus:border-zinc-500"
     >
       {options.map(o => (
-        <option key={o} value={o}>{o}</option>
+        <option key={o.value ?? o} value={o.value ?? o}>{o.label ?? o}</option>
       ))}
     </select>
+  )
+}
+
+// ── Query builder ─────────────────────────────────────────────────────────────
+
+const PLATFORMS = [
+  { value: 'linkedin',   label: 'LinkedIn',         site: 'site:linkedin.com/jobs' },
+  { value: 'ashby',      label: 'Ashby',            site: 'site:jobs.ashbyhq.com' },
+  { value: 'greenhouse', label: 'Greenhouse',       site: 'site:boards.greenhouse.io OR site:job-boards.greenhouse.io' },
+  { value: 'lever',      label: 'Lever',            site: 'site:jobs.lever.co' },
+  { value: 'wwr',        label: 'We Work Remotely', site: 'site:weworkremotely.com' },
+  { value: 'remoteok',   label: 'RemoteOK',         site: 'site:remoteok.com' },
+  { value: 'himalayas',  label: 'Himalayas',        site: 'site:himalayas.app' },
+  { value: 'wellfound',  label: 'Wellfound',        site: 'site:wellfound.com' },
+  { value: 'workable',   label: 'Workable',         site: 'site:apply.workable.com' },
+  { value: 'custom',     label: 'Custom…',          site: '' },
+]
+
+function detectPlatform(query) {
+  for (const p of PLATFORMS.filter(p => p.value !== 'custom')) {
+    if (query.includes(p.site.split(' OR ')[0])) return p.value
+  }
+  return 'custom'
+}
+
+function parseQueryToBuilder(query = '') {
+  const platform   = detectPlatform(query)
+  const keywords   = [...query.matchAll(/"([^"]+)"/g)].map(m => m[1]).filter(k => !k.startsWith('site:'))
+  const remote     = /\bremote\b/i.test(query)
+  const customSite = platform === 'custom' ? (query.match(/site:\S+/)?.[0] ?? '') : ''
+  return { platform, keywords: keywords.length ? keywords : [''], remote, customSite }
+}
+
+function buildQueryString(platform, keywords, remote, customSite) {
+  const site = platform === 'custom'
+    ? customSite
+    : (PLATFORMS.find(p => p.value === platform)?.site ?? '')
+  const kws  = keywords.filter(k => k.trim()).map(k => `"${k.trim()}"`).join(' OR ')
+  return [site, kws, remote ? 'remote' : ''].filter(Boolean).join(' ')
+}
+
+function QueryBuilder({ query, onChange }) {
+  const init = parseQueryToBuilder(query)
+  const [platform,   setPlatform]   = useState(init.platform)
+  const [keywords,   setKeywords]   = useState(init.keywords)
+  const [remote,     setRemote]     = useState(init.remote)
+  const [customSite, setCustomSite] = useState(init.customSite)
+
+  function emit(p, kws, r, cs) {
+    onChange(buildQueryString(p, kws, r, cs))
+  }
+
+  function updatePlatform(v)   { setPlatform(v);   emit(v,        keywords, remote, customSite) }
+  function updateRemote(v)     { setRemote(v);     emit(platform, keywords, v,      customSite) }
+  function updateCustomSite(v) { setCustomSite(v); emit(platform, keywords, remote, v) }
+  function updateKeyword(i, v) {
+    const next = keywords.map((k, j) => j === i ? v : k)
+    setKeywords(next); emit(platform, next, remote, customSite)
+  }
+  function addKeyword() {
+    const next = [...keywords, '']
+    setKeywords(next); emit(platform, next, remote, customSite)
+  }
+  function removeKeyword(i) {
+    const next = keywords.filter((_, j) => j !== i)
+    const safe = next.length ? next : ['']
+    setKeywords(safe); emit(platform, safe, remote, customSite)
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2 flex-wrap">
+        <select
+          value={platform}
+          onChange={e => updatePlatform(e.target.value)}
+          className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200 focus:outline-none focus:border-zinc-500"
+        >
+          {PLATFORMS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+        </select>
+        {platform === 'custom' && (
+          <input
+            value={customSite}
+            onChange={e => updateCustomSite(e.target.value)}
+            placeholder="site:example.com"
+            className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-300 placeholder-zinc-600 focus:outline-none focus:border-zinc-500 w-48 font-mono"
+          />
+        )}
+        <label className="flex items-center gap-1.5 text-xs text-zinc-400 cursor-pointer ml-auto">
+          <input type="checkbox" checked={remote} onChange={e => updateRemote(e.target.checked)} className="accent-emerald-500" />
+          Remote
+        </label>
+      </div>
+      <div className="space-y-1">
+        {keywords.map((k, i) => (
+          <div key={i} className="flex items-center gap-1">
+            <input
+              value={k}
+              onChange={e => updateKeyword(i, e.target.value)}
+              placeholder='e.g. Paid Media'
+              className="flex-1 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-zinc-500"
+            />
+            <button type="button" onClick={() => removeKeyword(i)} className="text-zinc-600 hover:text-rose-400 transition-colors text-base leading-none">×</button>
+          </div>
+        ))}
+        <button type="button" onClick={addKeyword} className="text-xs text-zinc-600 hover:text-zinc-400 transition-colors">+ keyword</button>
+      </div>
+    </div>
   )
 }
 
@@ -446,20 +553,28 @@ function PortalsSection() {
         </div>
         <div className="space-y-2">
           {(portals.search_queries || []).map((q, i) => (
-            <div key={i} className="flex items-start gap-2">
-              <button
-                type="button"
-                onClick={() => updateQuery(i, 'enabled', !q.enabled)}
-                className={`mt-1.5 flex-shrink-0 w-8 h-4 rounded-full transition-colors relative ${q.enabled ? 'bg-emerald-500' : 'bg-zinc-700'}`}
-                title={q.enabled ? 'Enabled' : 'Disabled'}
-              >
-                <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${q.enabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
-              </button>
-              <div className="flex-1 min-w-0 space-y-1">
-                <TextInput value={q.name} onChange={v => updateQuery(i, 'name', v)} placeholder="Query name" />
-                <TextInput value={q.query} onChange={v => updateQuery(i, 'query', v)} placeholder='site:linkedin.com/jobs "paid media" remote' />
+            <div key={i} className="bg-zinc-800/50 border border-zinc-700/50 rounded-lg p-3 space-y-2">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => updateQuery(i, 'enabled', !q.enabled)}
+                  className={`flex-shrink-0 w-8 h-4 rounded-full transition-colors relative ${q.enabled ? 'bg-emerald-500' : 'bg-zinc-700'}`}
+                  title={q.enabled ? 'Enabled' : 'Disabled'}
+                >
+                  <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${q.enabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                </button>
+                <input
+                  value={q.name || ''}
+                  onChange={e => updateQuery(i, 'name', e.target.value)}
+                  placeholder="Query name"
+                  className="flex-1 bg-transparent border-b border-zinc-700 px-1 py-0.5 text-xs text-zinc-300 placeholder-zinc-600 focus:outline-none focus:border-zinc-500"
+                />
+                <RemoveBtn onClick={() => removeQuery(i)} />
               </div>
-              <RemoveBtn onClick={() => removeQuery(i)} />
+              <QueryBuilder
+                query={q.query || ''}
+                onChange={v => updateQuery(i, 'query', v)}
+              />
             </div>
           ))}
           <AddBtn onClick={addQuery} label="+ Add search query" />
