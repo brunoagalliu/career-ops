@@ -397,6 +397,19 @@ function applyStatusUpdate(content, reportNumber, newStatus) {
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }))
 
+app.get('/api/debug/claude', requireAuth, (_req, res) => {
+  execFile('which', ['claude'], (err, stdout) => {
+    const whichResult = err ? `not found: ${err.message}` : stdout.trim()
+    execFile('claude', ['--version'], (err2, stdout2, stderr2) => {
+      res.json({
+        which: whichResult,
+        version: stdout2?.trim() || stderr2?.trim() || err2?.message || 'no output',
+        path: process.env.PATH,
+      })
+    })
+  })
+})
+
 app.get('/api/applications', requireAuth, async (req, res) => {
   try {
     const content = await getFile(req.user.id, 'data/applications.md')
@@ -623,12 +636,15 @@ function makeJobEndpoints(name, buildPrompt, model = 'claude-sonnet-4-5', snapsh
       await syncDbToWorkspace(req.user.id)
       const prompt = buildPrompt(ws)
 
+      broadcast('status', `Workspace: ${ws}`)
+
       const job = spawn('claude', ['-p', '--dangerously-skip-permissions', '--model', model], {
         cwd: ws,
         env: { ...process.env, ANTHROPIC_API_KEY: req.user.apiKey, NO_COLOR: '1', TERM: 'dumb' },
         stdio: ['pipe', 'pipe', 'pipe'],
       })
       state.job = job
+      broadcast('status', `claude pid ${job.pid ?? 'unknown'}`)
       job.stdin.write(prompt)
       job.stdin.end()
 
@@ -652,16 +668,16 @@ function makeJobEndpoints(name, buildPrompt, model = 'claude-sonnet-4-5', snapsh
 
       job.on('close', async (code) => {
         if (progressTimer) clearInterval(progressTimer)
+        broadcast('status', `claude exited with code ${code}`)
         try { await syncWorkspaceToDb(req.user.id) } catch {}
         state.done = true; state.exitCode = code ?? 0
         broadcast('done', String(state.exitCode))
-        // keep result available for 10 min so user can reopen panel
         setTimeout(() => { if (activeJobs.get(jobKey) === state) activeJobs.delete(jobKey) }, 10 * 60 * 1000)
       })
       job.on('error', (err) => {
         if (progressTimer) clearInterval(progressTimer)
         state.done = true; state.exitCode = 1
-        broadcast('error', `Failed to start: ${err.message}`)
+        broadcast('error', `Failed to start claude: ${err.message}`)
         broadcast('done', '1')
         setTimeout(() => { if (activeJobs.get(jobKey) === state) activeJobs.delete(jobKey) }, 10 * 60 * 1000)
       })
