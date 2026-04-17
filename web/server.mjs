@@ -20,16 +20,21 @@ fs.mkdirSync(WORKSPACES, { recursive: true })
 
 // ── Database ──────────────────────────────────────────────────────────────────
 
-const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false })
+if (!process.env.DATABASE_URL) {
+  console.error('ERROR: DATABASE_URL is not set. Add a PostgreSQL service in Railway and link it to this service.')
+  process.exit(1)
+}
+
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } })
 
 async function initDb() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
-      id           TEXT PRIMARY KEY,
-      email        TEXT UNIQUE NOT NULL,
+      id            TEXT PRIMARY KEY,
+      email         TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
-      api_key      TEXT NOT NULL DEFAULT '',
-      created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      api_key       TEXT NOT NULL DEFAULT '',
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `)
 }
