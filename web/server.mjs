@@ -624,7 +624,7 @@ function makeJobEndpoints(name, buildPrompt, model = 'claude-sonnet-4-5', snapsh
       await syncDbToWorkspace(req.user.id)
       const prompt = buildPrompt(ws)
 
-      const job = spawn('claude', ['-p', '--dangerously-skip-permissions', '--model', model, '--output-format', 'stream-json'], {
+      const job = spawn('claude', ['-p', '--dangerously-skip-permissions', '--model', model], {
         cwd: ws,
         env: { ...process.env, ANTHROPIC_API_KEY: req.user.apiKey, NO_COLOR: '1', TERM: 'dumb' },
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -633,43 +633,7 @@ function makeJobEndpoints(name, buildPrompt, model = 'claude-sonnet-4-5', snapsh
       job.stdin.write(prompt)
       job.stdin.end()
 
-      // parse newline-delimited stream-json from stdout
-      let lineBuf = ''
-      job.stdout.on('data', chunk => {
-        lineBuf += stripAnsi(chunk.toString())
-        const parts = lineBuf.split('\n')
-        lineBuf = parts.pop() || ''
-        for (const line of parts) {
-          if (!line.trim()) continue
-          try {
-            const ev = JSON.parse(line)
-            if (ev.type === 'assistant') {
-              for (const block of (ev.message?.content || [])) {
-                if (block.type === 'text' && block.text?.trim()) {
-                  broadcast('output', block.text)
-                } else if (block.type === 'tool_use') {
-                  const inp = block.input || {}
-                  const detail = inp.query
-                    ? `"${String(inp.query).slice(0, 90)}"`
-                    : inp.url
-                    ? String(inp.url).replace(/^https?:\/\//, '').slice(0, 90)
-                    : inp.command
-                    ? String(inp.command).slice(0, 90)
-                    : inp.prompt
-                    ? `"${String(inp.prompt).slice(0, 90)}"`
-                    : ''
-                  broadcast('status', `→ ${block.name}${detail ? ': ' + detail : ''}`)
-                }
-              }
-            } else if (ev.type === 'result' && ev.cost_usd != null) {
-              broadcast('status', `Finished — cost $${Number(ev.cost_usd).toFixed(4)}`)
-            }
-          } catch {
-            // not JSON — treat as plain text
-            if (line.trim()) broadcast('output', line)
-          }
-        }
-      })
+      job.stdout.on('data', chunk => { const t = stripAnsi(chunk.toString()); if (t.trim()) broadcast('output', t) })
       job.stderr.on('data', chunk => { const t = stripAnsi(chunk.toString()); if (t.trim()) broadcast('error',  t) })
 
       // progress polling
@@ -737,7 +701,10 @@ function buildScanPrompt(ws) {
     '- Execute ALL file writes immediately without asking for confirmation.',
     '- Write to data/pipeline.md and data/scan-history.tsv as you go.',
     '- NEVER say "Shall I update...?" or "Do you want me to...?" — just do it.',
-    '- After writing, print a brief summary of what was written.',
+    '- Print a short status line before each major action so the user sees live progress, e.g.:',
+    '  "→ Fetching: boards-api.greenhouse.io/v1/boards/hubspot/jobs"',
+    '  "→ Searching: site:jobs.ashbyhq.com paid media remote"',
+    '  "→ Writing 5 new offers to pipeline.md"',
     '',
     '## Instructions',
     'You are running career-ops scan in pipe mode (no Playwright available).',
