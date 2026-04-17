@@ -8,6 +8,7 @@ import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import { randomUUID } from 'crypto'
 import pg from 'pg'
+import treeKill from 'tree-kill'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT       = path.resolve(__dirname, '..')
@@ -527,7 +528,7 @@ function stripAnsi(str) {
 // activeJobs: jobKey → { job, buffer, done, exitCode, subscribers }
 const activeJobs = new Map()
 
-function makeJobEndpoints(name, buildPrompt) {
+function makeJobEndpoints(name, buildPrompt, model = 'claude-sonnet-4-5') {
   const key = (userId) => `${name}:${userId}`
 
   const statusHandler = (req, res) => {
@@ -589,7 +590,7 @@ function makeJobEndpoints(name, buildPrompt) {
       await syncDbToWorkspace(req.user.id)
       const prompt = buildPrompt(ws)
 
-      const job = spawn('claude', ['-p', '--dangerously-skip-permissions'], {
+      const job = spawn('claude', ['-p', '--dangerously-skip-permissions', '--model', model], {
         cwd: ws,
         env: { ...process.env, ANTHROPIC_API_KEY: req.user.apiKey, NO_COLOR: '1', TERM: 'dumb' },
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -624,7 +625,11 @@ function makeJobEndpoints(name, buildPrompt) {
   const stopHandler = (req, res) => {
     const state = activeJobs.get(key(req.user.id))
     if (!state || state.done) return res.status(404).json({ error: `No ${name} running` })
-    state.job?.kill()
+    if (state.job?.pid) {
+      treeKill(state.job.pid, 'SIGTERM')
+    } else {
+      state.job?.kill()
+    }
     res.json({ ok: true })
   }
 
@@ -650,7 +655,7 @@ function buildScanPrompt(ws) {
   ].join('\n')
 }
 
-const scan = makeJobEndpoints('scan', buildScanPrompt)
+const scan = makeJobEndpoints('scan', buildScanPrompt, 'claude-haiku-4-5-20251001')
 app.get('/api/scan/status', requireAuth, scan.statusHandler)
 app.get('/api/scan',        requireAuth, scan.startHandler)
 app.delete('/api/scan',     requireAuth, scan.stopHandler)
