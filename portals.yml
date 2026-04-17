@@ -1,0 +1,303 @@
+# Portal Scanner Configuration
+# Used by /career-ops scan to discover new offers automatically.
+#
+# Strategy (3 levels):
+#   1. Playwright → careers_url of each company (real-time, reliable)
+#   2. Greenhouse API → structured JSON (fast, Greenhouse-only)
+#   3. WebSearch with site: filters (broad discovery, may be stale)
+#
+# IMPORTANT: Each company in tracked_companies MUST have careers_url.
+
+# -- Title filter --
+# The scanner uses these keywords to decide if a title is relevant.
+# At least 1 positive must match AND 0 negatives must match (case-insensitive).
+
+title_filter:
+  positive:
+    # -- Paid Media / Paid Ads --
+    - "Paid Media"
+    - "Paid Ads"
+    - "Paid Search"
+    - "Paid Social"
+    - "PPC"
+    - "SEM"
+    - "Google Ads"
+    - "Meta Ads"
+    - "Facebook Ads"
+    - "Biddable Media"
+    - "Performance Marketing"
+    - "Performance Media"
+    - "Ad Operations"
+    - "Ad Ops"
+    - "AdOps"
+    - "Ad Trafficking"
+    - "Programmatic"
+    - "Display Advertising"
+    - "Search Advertising"
+    - "Digital Advertising"
+    - "Media Buyer"
+    - "Media Buying"
+    # -- Marketing roles --
+    - "Digital Marketing"
+    - "Growth Marketing"
+    - "Demand Generation"
+    - "Marketing Manager"
+  negative:
+    - "Intern"
+    - "SEO only"
+    - "Content Writer"
+    - "Copywriter"
+    - "Graphic Designer"
+    - "Software Engineer"
+    - "Developer"
+    - "Data Engineer"
+    - "Data Scientist"
+    - "Accountant"
+    - "Sales Representative"
+    - "Customer Support"
+  seniority_boost:
+    - "Senior"
+    - "Lead"
+    - "Head"
+    - "Manager"
+    - "Director"
+    - "Specialist"
+
+# -- Search queries --
+# Each query triggers a WebSearch. Use site: to filter by portal.
+
+search_queries:
+  # -- Ashby --
+  - name: Ashby — Paid Media
+    query: 'site:jobs.ashbyhq.com "Paid Media" OR "Paid Ads" OR "PPC" OR "SEM" remote'
+    enabled: true
+
+  - name: Ashby — Ad Operations
+    query: 'site:jobs.ashbyhq.com "Ad Operations" OR "Ad Ops" OR "Ad Trafficking" remote'
+    enabled: true
+
+  - name: Ashby — Performance Marketing
+    query: 'site:jobs.ashbyhq.com "Performance Marketing" OR "Growth Marketing" OR "Demand Generation" remote'
+    enabled: true
+
+  # -- Greenhouse --
+  - name: Greenhouse — Paid Media
+    query: 'site:boards.greenhouse.io OR site:job-boards.greenhouse.io "Paid Media" OR "Paid Ads" OR "PPC" remote'
+    enabled: true
+
+  - name: Greenhouse — Ad Ops
+    query: 'site:boards.greenhouse.io OR site:job-boards.greenhouse.io "Ad Operations" OR "Ad Ops" OR "Programmatic" remote'
+    enabled: true
+
+  - name: Greenhouse — Performance Marketing
+    query: 'site:boards.greenhouse.io OR site:job-boards.greenhouse.io "Performance Marketing" OR "Demand Generation" remote'
+    enabled: true
+
+  # -- Lever --
+  - name: Lever — Paid Media & Ad Ops
+    query: 'site:jobs.lever.co "Paid Media" OR "Paid Ads" OR "Ad Operations" OR "Performance Marketing" remote'
+    enabled: true
+
+  # -- LinkedIn --
+  - name: LinkedIn — Paid Media Remote
+    query: 'site:linkedin.com/jobs "paid media manager" OR "paid ads specialist" OR "performance marketing manager" remote'
+    enabled: true
+
+  - name: LinkedIn — Ad Operations Remote
+    query: 'site:linkedin.com/jobs "ad operations manager" OR "ad ops" OR "programmatic manager" remote'
+    enabled: true
+
+  # -- We Work Remotely --
+  - name: WWR — Marketing
+    query: 'site:weworkremotely.com "paid media" OR "paid ads" OR "PPC" OR "performance marketing" OR "ad operations"'
+    enabled: true
+
+  # -- Remote OK --
+  - name: RemoteOK — Marketing
+    query: 'site:remoteok.com "paid media" OR "paid ads" OR "ad operations" OR "performance marketing"'
+    enabled: true
+
+  # -- Himalayas (remote-first aggregator) --
+  - name: Himalayas — Paid Media Remote
+    query: 'site:himalayas.app "paid media" OR "performance marketing" OR "paid search" OR "paid social" remote'
+    enabled: true
+
+  # -- Wellfound (startups) --
+  - name: Wellfound — Performance Marketing
+    query: 'site:wellfound.com "paid media" OR "performance marketing" OR "growth marketing" remote'
+    enabled: true
+
+# -- Tracked companies --
+# Companies whose career pages are checked directly.
+# scan_method: playwright (default), websearch, greenhouse_api
+
+tracked_companies:
+
+  # -- Ad Tech & Marketing Platforms --
+
+  - name: The Trade Desk
+    careers_url: https://job-boards.greenhouse.io/thetradedesk
+    api: https://boards-api.greenhouse.io/v1/boards/thetradedesk/jobs
+    notes: "Programmatic advertising platform. Strong paid media & ad ops teams."
+    enabled: true
+
+  - name: DoubleVerify
+    careers_url: https://job-boards.greenhouse.io/doubleverify
+    api: https://boards-api.greenhouse.io/v1/boards/doubleverify/jobs
+    notes: "Digital media quality & measurement. Ad ops and programmatic roles."
+    enabled: true
+
+  - name: Moloco
+    careers_url: https://job-boards.greenhouse.io/moloco
+    api: https://boards-api.greenhouse.io/v1/boards/moloco/jobs
+    notes: "ML-powered programmatic advertising. Growth roles."
+    enabled: true
+
+  - name: Criteo
+    careers_url: https://www.criteo.com/careers
+    scan_method: websearch
+    scan_query: 'site:criteo.com/careers "paid media" OR "performance marketing" OR "ad operations"'
+    notes: "Retargeting & commerce media network."
+    enabled: true
+
+  - name: HubSpot
+    careers_url: https://job-boards.greenhouse.io/hubspot
+    api: https://boards-api.greenhouse.io/v1/boards/hubspot/jobs
+    notes: "CRM & marketing platform. Large performance marketing org."
+    enabled: true
+
+  - name: Klaviyo
+    careers_url: https://job-boards.greenhouse.io/klaviyo
+    api: https://boards-api.greenhouse.io/v1/boards/klaviyo/jobs
+    notes: "Email & SMS marketing platform. Demand gen & paid media roles."
+    enabled: true
+
+  - name: Braze
+    careers_url: https://job-boards.greenhouse.io/braze
+    api: https://boards-api.greenhouse.io/v1/boards/braze/jobs
+    notes: "Customer engagement platform. Performance & demand gen roles."
+    enabled: true
+
+  - name: Iterable
+    careers_url: https://job-boards.greenhouse.io/iterable
+    api: https://boards-api.greenhouse.io/v1/boards/iterable/jobs
+    notes: "Cross-channel marketing automation. Remote-friendly."
+    enabled: true
+
+  - name: Attentive
+    careers_url: https://job-boards.greenhouse.io/attentive
+    api: https://boards-api.greenhouse.io/v1/boards/attentive/jobs
+    notes: "SMS + email marketing platform. Growth & demand gen hiring."
+    enabled: true
+
+  # -- Growth-focused SaaS (active paid media teams) --
+
+  - name: Intercom
+    careers_url: https://job-boards.greenhouse.io/intercom
+    api: https://boards-api.greenhouse.io/v1/boards/intercom/jobs
+    notes: "Dublin. Customer comms platform with active growth/demand gen team."
+    enabled: true
+
+  - name: Gong
+    careers_url: https://www.gong.io/careers
+    scan_method: websearch
+    scan_query: 'site:gong.io/careers "paid media" OR "performance marketing" OR "demand generation" OR "growth"'
+    notes: "Revenue intelligence. Strong marketing org."
+    enabled: true
+
+  - name: Salesforce
+    careers_url: https://careers.salesforce.com
+    scan_method: websearch
+    scan_query: 'site:careers.salesforce.com "paid media" OR "performance marketing" OR "demand generation" OR "paid search"'
+    notes: "Large enterprise SaaS. Big performance marketing org."
+    enabled: true
+
+  - name: Drift
+    careers_url: https://job-boards.greenhouse.io/drift
+    api: https://boards-api.greenhouse.io/v1/boards/drift/jobs
+    notes: "Conversational marketing platform. Demand gen roles."
+    enabled: true
+
+  - name: Semrush
+    careers_url: https://job-boards.greenhouse.io/semrush
+    api: https://boards-api.greenhouse.io/v1/boards/semrush/jobs
+    notes: "SEO/SEM analytics platform. Paid media & performance marketing."
+    enabled: true
+
+  - name: Similarweb
+    careers_url: https://job-boards.greenhouse.io/similarweb
+    api: https://boards-api.greenhouse.io/v1/boards/similarweb/jobs
+    notes: "Digital intelligence platform. Demand gen and paid media roles."
+    enabled: true
+
+  - name: Sprinklr
+    careers_url: https://job-boards.greenhouse.io/sprinklr
+    api: https://boards-api.greenhouse.io/v1/boards/sprinklr/jobs
+    notes: "Unified CXM platform. Paid social & ad ops roles."
+    enabled: true
+
+  # -- E-commerce & Retail (heavy paid media users) --
+
+  - name: Shopify
+    careers_url: https://job-boards.greenhouse.io/shopify
+    api: https://boards-api.greenhouse.io/v1/boards/shopify/jobs
+    notes: "E-commerce platform. Growth & paid media hiring."
+    enabled: true
+
+  - name: Faire
+    careers_url: https://job-boards.greenhouse.io/faire
+    api: https://boards-api.greenhouse.io/v1/boards/faire/jobs
+    notes: "B2B wholesale marketplace. Growth/demand gen roles."
+    enabled: true
+
+  - name: Yotpo
+    careers_url: https://job-boards.greenhouse.io/yotpo
+    api: https://boards-api.greenhouse.io/v1/boards/yotpo/jobs
+    notes: "E-commerce marketing platform. Paid & performance roles."
+    enabled: true
+
+  # -- Agencies & Media Networks (in-house teams) --
+
+  - name: Tinuiti
+    careers_url: https://job-boards.greenhouse.io/tinuiti
+    api: https://boards-api.greenhouse.io/v1/boards/tinuiti/jobs
+    notes: "Performance marketing agency. Heavy paid search/social/programmatic hiring."
+    enabled: true
+
+  - name: Wpromote
+    careers_url: https://job-boards.greenhouse.io/wpromote
+    api: https://boards-api.greenhouse.io/v1/boards/wpromote/jobs
+    notes: "Digital performance agency. Paid media specialist roles."
+    enabled: true
+
+  - name: Jellyfish
+    careers_url: https://jobs.lever.co/jellyfish
+    notes: "Digital media agency. Paid social, paid search, programmatic roles."
+    enabled: true
+
+  - name: Skai (formerly Kenshoo)
+    careers_url: https://jobs.lever.co/skai
+    notes: "Omnichannel advertising intelligence platform."
+    enabled: true
+
+  # -- Travel & Marketplace (major paid media spenders) --
+
+  - name: Booking.com
+    careers_url: https://jobs.booking.com
+    scan_method: websearch
+    scan_query: 'site:jobs.booking.com "paid media" OR "performance marketing" OR "paid search" OR "paid social"'
+    notes: "Amsterdam. One of the largest paid media buyers globally."
+    enabled: true
+
+  - name: Tripadvisor
+    careers_url: https://job-boards.greenhouse.io/tripadvisor
+    api: https://boards-api.greenhouse.io/v1/boards/tripadvisor/jobs
+    notes: "Travel platform. Paid search & programmatic teams."
+    enabled: true
+
+  - name: Travelperk
+    careers_url: https://jobs.ashbyhq.com/travelperk
+    scan_method: websearch
+    scan_query: 'site:jobs.ashbyhq.com/travelperk "paid media" OR "performance marketing" OR "growth" OR "demand generation"'
+    notes: "Barcelona. Business travel unicorn. Growth/marketing roles."
+    enabled: true

@@ -1,0 +1,25 @@
+# Dependencies (reinstalled inside container)
+node_modules/
+web/node_modules/
+web/dist/
+
+# Dashboard (Go binary, not needed for web)
+dashboard/
+
+# Git history
+.git/
+
+# Claude Code local settings
+.claude/settings.local.json
+.claude/memory/
+
+# Large media / generated
+output/
+*.mov
+*.mp4
+.DS_Store
+
+# Batch logs (runtime state)
+batch/logs/
+batch/batch-state.tsv
+batch/batch-input.tsv

@@ -1,0 +1,17 @@
+# Railway upload exclusions — overrides .gitignore
+# Personal data files (applications.md, reports/, config/, etc.) ARE included
+
+node_modules/
+web/node_modules/
+web/dist/
+dashboard/
+.git/
+.DS_Store
+*.mov
+*.mp4
+output/
+batch/logs/
+batch/batch-state.tsv
+batch/batch-input.tsv
+.claude/settings.local.json
+.claude/memory/
