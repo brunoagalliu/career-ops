@@ -14,6 +14,7 @@ export default function App() {
   const [activePanel, setActivePanel] = useState(null)
   const [pipelineKey, setPipelineKey] = useState(0)
   const [scanAvailable, setScanAvailable] = useState(null)
+  const [jobStatus, setJobStatus]         = useState({ pipeline: false, scan: false })
 
   // On mount: check if setup needed, then verify token
   useEffect(() => {
@@ -65,6 +66,20 @@ export default function App() {
 
   const handleScanComplete = useCallback(() => setPipelineKey(k => k + 1), [])
 
+  // Poll job status every 5s so the header indicator stays accurate
+  useEffect(() => {
+    if (!user || !scanAvailable) return
+    function poll() {
+      Promise.all([
+        authFetch('/api/pipeline/status').then(r => r.json()).catch(() => ({})),
+        authFetch('/api/scan/status').then(r => r.json()).catch(() => ({})),
+      ]).then(([p, s]) => setJobStatus({ pipeline: p.running, scan: s.running }))
+    }
+    poll()
+    const id = setInterval(poll, 5000)
+    return () => clearInterval(id)
+  }, [user, scanAvailable])
+
   if (authLoading) {
     return (
       <div className="min-h-screen bg-zinc-950 flex items-center justify-center">
@@ -90,15 +105,19 @@ export default function App() {
               <>
                 <button
                   onClick={() => setActivePanel('pipeline')}
-                  className="px-3 py-1.5 rounded text-sm font-medium transition-colors text-amber-300 hover:text-amber-200 hover:bg-amber-500/10 border border-amber-500/30 hover:border-amber-400/50"
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium transition-colors text-amber-300 hover:text-amber-200 hover:bg-amber-500/10 border border-amber-500/30 hover:border-amber-400/50"
                 >
-                  ▶ Pipeline
+                  {jobStatus.pipeline
+                    ? <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                    : '▶'} Pipeline
                 </button>
                 <button
                   onClick={() => setActivePanel('scan')}
-                  className="px-3 py-1.5 rounded text-sm font-medium transition-colors text-violet-300 hover:text-violet-200 hover:bg-violet-500/10 border border-violet-500/30 hover:border-violet-400/50"
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium transition-colors text-violet-300 hover:text-violet-200 hover:bg-violet-500/10 border border-violet-500/30 hover:border-violet-400/50"
                 >
-                  ▶ Scan
+                  {jobStatus.scan
+                    ? <span className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-pulse" />
+                    : '▶'} Scan
                 </button>
               </>
             )}

@@ -524,78 +524,107 @@ function stripAnsi(str) {
   return str.replace(/\x1b\[[0-9;]*[mGKHF]/g, '').replace(/\x1b\][^\x07]*\x07/g, '')
 }
 
-const activeJobs = new Map() // `${name}:${userId}` -> process
+// activeJobs: jobKey → { job, buffer, done, exitCode, subscribers }
+const activeJobs = new Map()
 
 function makeJobEndpoints(name, buildPrompt) {
   const key = (userId) => `${name}:${userId}`
 
   const statusHandler = (req, res) => {
-    res.json({ running: activeJobs.has(key(req.user.id)), available: Boolean(req.user.apiKey) })
+    const state = activeJobs.get(key(req.user.id))
+    res.json({
+      running:   Boolean(state && !state.done),
+      available: Boolean(req.user.apiKey),
+      hasResult: Boolean(state?.done),
+    })
   }
 
   const startHandler = async (req, res) => {
     const jobKey = key(req.user.id)
-    if (!req.user.apiKey) {
-      return res.status(503).json({ error: 'No API key set. Add it in Settings.' })
-    }
-    if (activeJobs.has(jobKey)) return res.status(409).json({ error: `${name} already running` })
 
     res.setHeader('Content-Type', 'text/event-stream')
     res.setHeader('Cache-Control', 'no-cache')
     res.setHeader('Connection', 'keep-alive')
     res.flushHeaders()
 
-    const send = (type, text) => res.write(`data: ${JSON.stringify({ type, text })}\n\n`)
-    const keepalive = setInterval(() => res.write(': ping\n\n'), 20000)
+    const send     = (type, text) => { if (!res.writableEnded) res.write(`data: ${JSON.stringify({ type, text })}\n\n`) }
+    const ping     = setInterval(() => { if (!res.writableEnded) res.write(': ping\n\n') }, 20000)
+    const detach   = () => { clearInterval(ping) }
 
-    send('status', `Starting ${name}…`)
+    // ── Reconnect to existing job ─────────────────────────────────────────────
+    const existing = activeJobs.get(jobKey)
+    if (existing) {
+      for (const msg of existing.buffer) send(msg.type, msg.text)
+      if (existing.done) {
+        send('done', String(existing.exitCode ?? 0))
+        detach(); res.end(); return
+      }
+      existing.subscribers.add(send)
+      req.on('close', () => { existing.subscribers.delete(send); detach() })
+      return
+    }
 
-    const ws = getWorkspace(req.user.id)
+    // ── Start new job ─────────────────────────────────────────────────────────
+    if (!req.user.apiKey) {
+      send('error', 'No API key set. Add it in Settings.')
+      send('done', '1'); detach(); res.end(); return
+    }
 
-    // sync all user files from DB to workspace before claude runs
-    await syncDbToWorkspace(req.user.id)
+    const state = { job: null, buffer: [], done: false, exitCode: null, subscribers: new Set([send]) }
+    activeJobs.set(jobKey, state)
 
-    const prompt = buildPrompt(ws)
+    // broadcast to all current subscribers and buffer
+    const broadcast = (type, text) => {
+      state.buffer.push({ type, text })
+      for (const sub of state.subscribers) sub(type, text)
+    }
 
-    const job = spawn('claude', ['-p', '--dangerously-skip-permissions'], {
-      cwd: ws,
-      env: { ...process.env, ANTHROPIC_API_KEY: req.user.apiKey, NO_COLOR: '1', TERM: 'dumb' },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    })
-    activeJobs.set(jobKey, job)
-    job.stdin.write(prompt)
-    job.stdin.end()
+    // connection close: unsubscribe but keep job running
+    req.on('close', () => { state.subscribers.delete(send); detach() })
 
-    job.stdout.on('data', (chunk) => {
-      const text = stripAnsi(chunk.toString())
-      if (text.trim()) send('output', text)
-    })
-    job.stderr.on('data', (chunk) => {
-      const text = stripAnsi(chunk.toString())
-      if (text.trim()) send('error', text)
-    })
-    job.on('close', async (code) => {
-      clearInterval(keepalive); activeJobs.delete(jobKey)
-      // sync workspace files back to DB after claude finishes
-      try { await syncWorkspaceToDb(req.user.id) } catch {}
-      send('done', String(code ?? 0)); res.end()
-    })
-    job.on('error', (err) => {
-      clearInterval(keepalive); activeJobs.delete(jobKey)
-      send('error', `Failed to start: ${err.message}`); send('done', '1'); res.end()
-    })
-    req.on('close', () => {
-      clearInterval(keepalive)
-      const j = activeJobs.get(jobKey)
-      if (j) { j.kill(); activeJobs.delete(jobKey) }
-    })
+    broadcast('status', `Starting ${name}…`)
+
+    try {
+      const ws = getWorkspace(req.user.id)
+      await syncDbToWorkspace(req.user.id)
+      const prompt = buildPrompt(ws)
+
+      const job = spawn('claude', ['-p', '--dangerously-skip-permissions'], {
+        cwd: ws,
+        env: { ...process.env, ANTHROPIC_API_KEY: req.user.apiKey, NO_COLOR: '1', TERM: 'dumb' },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      })
+      state.job = job
+      job.stdin.write(prompt)
+      job.stdin.end()
+
+      job.stdout.on('data', chunk => { const t = stripAnsi(chunk.toString()); if (t.trim()) broadcast('output', t) })
+      job.stderr.on('data', chunk => { const t = stripAnsi(chunk.toString()); if (t.trim()) broadcast('error',  t) })
+
+      job.on('close', async (code) => {
+        try { await syncWorkspaceToDb(req.user.id) } catch {}
+        state.done = true; state.exitCode = code ?? 0
+        broadcast('done', String(state.exitCode))
+        // keep result available for 10 min so user can reopen panel
+        setTimeout(() => { if (activeJobs.get(jobKey) === state) activeJobs.delete(jobKey) }, 10 * 60 * 1000)
+      })
+      job.on('error', (err) => {
+        state.done = true; state.exitCode = 1
+        broadcast('error', `Failed to start: ${err.message}`)
+        broadcast('done', '1')
+        setTimeout(() => { if (activeJobs.get(jobKey) === state) activeJobs.delete(jobKey) }, 10 * 60 * 1000)
+      })
+    } catch (err) {
+      state.done = true; state.exitCode = 1
+      broadcast('error', err.message); broadcast('done', '1')
+      activeJobs.delete(jobKey)
+    }
   }
 
   const stopHandler = (req, res) => {
-    const jobKey = key(req.user.id)
-    const job    = activeJobs.get(jobKey)
-    if (!job) return res.status(404).json({ error: `No ${name} running` })
-    job.kill(); activeJobs.delete(jobKey)
+    const state = activeJobs.get(key(req.user.id))
+    if (!state || state.done) return res.status(404).json({ error: `No ${name} running` })
+    state.job?.kill()
     res.json({ ok: true })
   }
 
