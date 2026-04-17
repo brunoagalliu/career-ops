@@ -681,7 +681,7 @@ function buildPipelinePrompt(ws) {
   ].join('\n')
 }
 
-const pipeline = makeJobEndpoints('pipeline', buildPipelinePrompt)
+const pipeline = makeJobEndpoints('pipeline', buildPipelinePrompt, 'claude-haiku-4-5-20251001')
 app.get('/api/pipeline/status', requireAuth, pipeline.statusHandler)
 app.get('/api/pipeline',        requireAuth, pipeline.startHandler)
 app.delete('/api/pipeline',     requireAuth, pipeline.stopHandler)
