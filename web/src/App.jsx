@@ -6,6 +6,34 @@ import Login from './components/Login.jsx'
 import Settings from './components/Settings.jsx'
 import { authFetch, getToken, clearToken } from './api.js'
 
+function DownloadCvButton() {
+  const [loading, setLoading] = useState(false)
+  async function handleClick() {
+    setLoading(true)
+    try {
+      const res = await authFetch('/api/cv/pdf')
+      if (!res.ok) { const e = await res.json(); alert(e.error || 'Failed'); return }
+      const blob = await res.blob()
+      const url  = URL.createObjectURL(blob)
+      const a    = document.createElement('a')
+      a.href     = url
+      a.download = 'cv.pdf'
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (e) { alert(e.message) }
+    finally { setLoading(false) }
+  }
+  return (
+    <button
+      onClick={handleClick}
+      disabled={loading}
+      className="flex items-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium transition-colors text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 border border-zinc-700/40 hover:border-zinc-600/60 disabled:opacity-50"
+    >
+      {loading ? <span className="inline-block w-3 h-3 border border-zinc-400 border-t-transparent rounded-full animate-spin" /> : '↓'} CV PDF
+    </button>
+  )
+}
+
 export default function App() {
   const [user, setUser]               = useState(null)
   const [authLoading, setAuthLoading] = useState(true)
@@ -130,6 +158,7 @@ export default function App() {
                 ⚠ Add API key
               </button>
             )}
+            <DownloadCvButton />
             <nav className="flex gap-1">
               {['pipeline', 'profile', 'settings'].map(v => (
                 <button

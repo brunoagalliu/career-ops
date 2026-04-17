@@ -9,6 +9,7 @@ import jwt from 'jsonwebtoken'
 import { randomUUID } from 'crypto'
 import pg from 'pg'
 import treeKill from 'tree-kill'
+import { chromium } from 'playwright'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT       = path.resolve(__dirname, '..')
@@ -787,6 +788,205 @@ const pipeline = makeJobEndpoints('pipeline', buildPipelinePrompt, 'claude-haiku
 app.get('/api/pipeline/status', requireAuth, pipeline.statusHandler)
 app.get('/api/pipeline',        requireAuth, pipeline.startHandler)
 app.delete('/api/pipeline',     requireAuth, pipeline.stopHandler)
+
+// ── CV PDF generation (no tokens) ─────────────────────────────────────────────
+
+function escHtml(s) {
+  return String(s || '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+function inlineMd(text) {
+  return escHtml(text)
+    .replace(/\*\*(.+?)\*\*/g, (_, t) => `<strong>${t}</strong>`)
+}
+
+function parseCvMd(md) {
+  const lines   = md.split('\n')
+
+  // Name: first # heading
+  const nameIdx = lines.findIndex(l => l.startsWith('# '))
+  const name    = nameIdx >= 0 ? lines[nameIdx].slice(2).trim() : ''
+
+  // Contact line: contains @ and |
+  const contactLine = lines.find(l => l.includes('@') && l.includes('|')) || ''
+  const cParts      = contactLine.split('|').map(p => p.trim()).filter(Boolean)
+  const email       = cParts.find(p => p.includes('@')) || ''
+  const linkedinRaw = cParts.find(p => p.toLowerCase().includes('linkedin')) || ''
+  const linkedinUrl = linkedinRaw ? (linkedinRaw.startsWith('http') ? linkedinRaw : `https://${linkedinRaw}`) : ''
+  const portfolioRaw = cParts.find(p =>
+    !p.includes('@') && !p.toLowerCase().includes('linkedin') &&
+    !p.startsWith('+') &&
+    (p.includes('.io') || p.includes('.dev') || (p.includes('.com') && !p.includes(',')))
+  ) || ''
+  const portfolioUrl = portfolioRaw ? (portfolioRaw.startsWith('http') ? portfolioRaw : `https://${portfolioRaw}`) : ''
+  const location = cParts.find(p =>
+    !p.includes('@') && !p.toLowerCase().includes('linkedin') &&
+    !p.startsWith('+') && !p.includes('.io') && !p.includes('.dev') &&
+    !(p.includes('.com') && !p.includes(','))
+  ) || ''
+
+  // Split into ## sections
+  const secs = {}
+  let cur = '', secLines = []
+  for (const line of lines) {
+    if (line.startsWith('## ')) {
+      if (cur) secs[cur.toLowerCase()] = secLines.join('\n').trim()
+      cur      = line.slice(3).trim()
+      secLines = []
+    } else {
+      secLines.push(line)
+    }
+  }
+  if (cur) secs[cur.toLowerCase()] = secLines.join('\n').trim()
+
+  return { name, email, linkedinUrl, linkedinDisplay: linkedinRaw.replace(/^https?:\/\//, ''),
+           portfolioUrl, portfolioDisplay: portfolioRaw.replace(/^https?:\/\//, ''), location, secs }
+}
+
+function buildContactRow({ email, linkedinUrl, linkedinDisplay, portfolioUrl, portfolioDisplay, location }) {
+  const items = []
+  if (email)            items.push(`<span>${escHtml(email)}</span>`)
+  if (linkedinDisplay)  items.push(`<a href="${escHtml(linkedinUrl)}">${escHtml(linkedinDisplay)}</a>`)
+  if (portfolioDisplay) items.push(`<a href="${escHtml(portfolioUrl)}">${escHtml(portfolioDisplay)}</a>`)
+  if (location)         items.push(`<span>${escHtml(location)}</span>`)
+  return items.join('<span class="separator">|</span>')
+}
+
+function buildExperienceHtml(content) {
+  return content.split(/(?=^### )/m).filter(s => s.trim()).map(block => {
+    const bLines   = block.split('\n')
+    const header   = (bLines.find(l => l.startsWith('### ')) || '').slice(4).trim()
+    const parts    = header.split(/\s*[—–-]\s*/)
+    const jobTitle = parts[0]?.trim() || ''
+    const company  = parts.slice(1).join(' – ').trim() || ''
+    const dateLine = bLines.find(l => {
+      const t = l.trim(); return t.startsWith('**') && t.endsWith('**') && /\d{4}|Present/.test(t)
+    })
+    const date    = (dateLine || '').replace(/\*\*/g, '').trim()
+    const bullets = bLines.filter(l => l.trim().startsWith('- '))
+      .map(l => `<li>${inlineMd(l.slice(l.indexOf('- ') + 2))}</li>`).join('')
+    return `<div class="job avoid-break">
+  <div class="job-header">
+    <span class="job-company">${escHtml(company)}</span>
+    <span class="job-period">${escHtml(date)}</span>
+  </div>
+  <div class="job-role">${escHtml(jobTitle)}</div>
+  ${bullets ? `<ul>${bullets}</ul>` : ''}
+</div>`
+  }).join('\n')
+}
+
+function buildEducationHtml(content) {
+  return content.split('\n').filter(l => l.trim().startsWith('**') && l.includes('—')).map(l => {
+    const clean   = l.replace(/\*\*/g, '')
+    const [lhs, dateStr] = clean.split(/\s*\|\s*/)
+    const [degree, ...orgParts] = lhs.split(/\s*—\s*/)
+    const org = orgParts.join(' — ').trim()
+    return `<div class="edu-item">
+  <div class="edu-header">
+    <div><span class="edu-title">${escHtml(degree.trim())}</span>${org ? ` <span class="edu-org">· ${escHtml(org)}</span>` : ''}</div>
+    ${dateStr ? `<span class="edu-year">${escHtml(dateStr.trim())}</span>` : ''}
+  </div>
+</div>`
+  }).join('\n')
+}
+
+function buildSkillsHtml(content) {
+  return content.split('\n').filter(l => l.trim().startsWith('**') && l.includes(':')).map(l => {
+    const clean  = l.replace(/\*\*/g, '')
+    const colon  = clean.indexOf(':')
+    const cat    = clean.slice(0, colon).trim()
+    const items  = clean.slice(colon + 1).trim()
+    return `<div class="skill-item"><span class="skill-category">${escHtml(cat)}:</span> ${escHtml(items)}</div>`
+  }).join('\n')
+}
+
+function buildCompetenciesHtml(skillsContent) {
+  return skillsContent.split('\n').filter(l => l.trim().startsWith('**') && l.includes(':'))
+    .map(l => l.replace(/\*\*([^*]+)\*\*:.*/s, '$1').trim()).filter(Boolean)
+    .map(c => `<span class="competency-tag">${escHtml(c)}</span>`).join('\n')
+}
+
+function buildCvHtml(parsed) {
+  const fontsDir = path.join(ROOT, 'fonts')
+  let css = (fs.readFileSync(path.join(ROOT, 'templates', 'cv-template.html'), 'utf8')
+    .match(/<style>([\s\S]*?)<\/style>/)?.[1] || '')
+    .replace('{{PAGE_WIDTH}}', '780px')
+    .replace(/url\(['"]?\.\/fonts\//g, `url('file://${fontsDir}/`)
+
+  const { name, secs } = parsed
+  const summaryText     = secs['summary'] || ''
+  const experienceHtml  = secs['work experience'] ? buildExperienceHtml(secs['work experience']) : ''
+  const educationHtml   = secs['education']       ? buildEducationHtml(secs['education'])        : ''
+  const skillsContent   = secs['skills'] || ''
+  const skillsHtml      = buildSkillsHtml(skillsContent)
+  const competHtml      = buildCompetenciesHtml(skillsContent)
+
+  const section = (title, content, extra = '') =>
+    content ? `<div class="section${extra} avoid-break">
+  <div class="section-title">${escHtml(title)}</div>
+  ${content}
+</div>` : ''
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>${escHtml(name)} — CV</title>
+<style>${css}</style>
+</head>
+<body>
+<div class="page">
+  <div class="header avoid-break">
+    <h1>${escHtml(name)}</h1>
+    <div class="header-gradient"></div>
+    <div class="contact-row">${buildContactRow(parsed)}</div>
+  </div>
+  ${section('Professional Summary', summaryText ? `<div class="summary-text">${escHtml(summaryText)}</div>` : '')}
+  ${competHtml ? `<div class="section"><div class="section-title">Core Competencies</div><div class="competencies-grid">${competHtml}</div></div>` : ''}
+  ${experienceHtml ? `<div class="section"><div class="section-title">Work Experience</div>${experienceHtml}</div>` : ''}
+  ${section('Education', educationHtml)}
+  ${skillsHtml ? `<div class="section avoid-break"><div class="section-title">Skills</div><div class="skills-grid">${skillsHtml}</div></div>` : ''}
+</div>
+</body>
+</html>`
+}
+
+async function htmlToPdf(html) {
+  const browser = await chromium.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+  })
+  try {
+    const page = await browser.newPage()
+    await page.setContent(html, { waitUntil: 'networkidle' })
+    await page.evaluate(() => document.fonts.ready)
+    return await page.pdf({
+      format: 'a4', printBackground: true,
+      margin: { top: '0.6in', right: '0.6in', bottom: '0.6in', left: '0.6in' },
+    })
+  } finally {
+    await browser.close()
+  }
+}
+
+app.get('/api/cv/pdf', requireAuth, async (req, res) => {
+  try {
+    const content = await getFile(req.user.id, 'cv.md')
+    if (!content) return res.status(404).json({ error: 'cv.md not found. Add your CV in the Profile tab first.' })
+    const parsed  = parseCvMd(content)
+    const html    = buildCvHtml(parsed)
+    const pdfBuf  = await htmlToPdf(html)
+    const slug    = (parsed.name || 'cv').toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', `attachment; filename="cv-${slug}.pdf"`)
+    res.setHeader('Content-Length', pdfBuf.length)
+    res.send(pdfBuf)
+  } catch (e) {
+    console.error('CV PDF error:', e)
+    res.status(500).json({ error: e.message })
+  }
+})
 
 // ── SPA fallback ──────────────────────────────────────────────────────────────
 
