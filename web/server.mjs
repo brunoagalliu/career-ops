@@ -638,7 +638,7 @@ function makeJobEndpoints(name, buildPrompt, model = 'claude-sonnet-4-5', snapsh
 
       broadcast('status', `Workspace: ${ws}`)
 
-      const job = spawn('claude', ['-p', '--dangerously-skip-permissions', '--model', model], {
+      const job = spawn('claude', ['-p', '--dangerously-skip-permissions', '--model', model, '--output-format', 'stream-json'], {
         cwd: ws,
         env: { ...process.env, ANTHROPIC_API_KEY: req.user.apiKey, NO_COLOR: '1', TERM: 'dumb' },
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -648,8 +648,32 @@ function makeJobEndpoints(name, buildPrompt, model = 'claude-sonnet-4-5', snapsh
       job.stdin.write(prompt)
       job.stdin.end()
 
-      job.stdout.on('data', chunk => { const t = stripAnsi(chunk.toString()); if (t.trim()) broadcast('output', t) })
-      job.stderr.on('data', chunk => { const t = stripAnsi(chunk.toString()); if (t.trim()) broadcast('error',  t) })
+      // claude -p with stream-json: each line is a JSON event
+      let lineBuf = ''
+      job.stdout.on('data', chunk => {
+        lineBuf += stripAnsi(chunk.toString())
+        const parts = lineBuf.split('\n')
+        lineBuf = parts.pop() || ''
+        for (const line of parts) {
+          const raw = line.trim()
+          if (!raw) continue
+          try {
+            const ev = JSON.parse(raw)
+            if (ev.type === 'assistant') {
+              for (const block of (ev.message?.content || [])) {
+                if (block.type === 'text' && block.text?.trim()) broadcast('output', block.text)
+              }
+            } else if (ev.type === 'result') {
+              if (ev.result?.trim()) broadcast('output', ev.result)
+              const cost = ev.total_cost_usd ?? ev.cost_usd
+              if (cost != null) broadcast('status', `Cost: $${Number(cost).toFixed(4)}`)
+            }
+          } catch {
+            if (raw) broadcast('output', raw)
+          }
+        }
+      })
+      job.stderr.on('data', chunk => { const t = stripAnsi(chunk.toString()); if (t.trim()) broadcast('error', t) })
 
       // progress polling
       let progressTimer = null
