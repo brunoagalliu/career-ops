@@ -34,9 +34,14 @@ async function initDb() {
       email         TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
       api_key       TEXT NOT NULL DEFAULT '',
+      profile_yml   TEXT NOT NULL DEFAULT '',
+      portals_yml   TEXT NOT NULL DEFAULT '',
       created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `)
+  // migrate existing tables that predate these columns
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_yml TEXT NOT NULL DEFAULT ''`)
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS portals_yml TEXT NOT NULL DEFAULT ''`)
 }
 
 async function countUsers()          { const r = await pool.query('SELECT COUNT(*) FROM users'); return parseInt(r.rows[0].count, 10) }
@@ -49,14 +54,18 @@ async function createUser({ id, email, passwordHash }) {
   )
   return r.rows[0]
 }
-async function setApiKey(id, apiKey) {
-  await pool.query('UPDATE users SET api_key = $1 WHERE id = $2', [apiKey, id])
-}
+async function setApiKey(id, apiKey)       { await pool.query('UPDATE users SET api_key    = $1 WHERE id = $2', [apiKey,   id]) }
+async function setProfileYml(id, yml)      { await pool.query('UPDATE users SET profile_yml = $1 WHERE id = $2', [yml,     id]) }
+async function setPortalsYml(id, yml)      { await pool.query('UPDATE users SET portals_yml = $1 WHERE id = $2', [yml,     id]) }
 
 // map snake_case DB row → camelCase object used throughout the server
 function toUser(row) {
   if (!row) return null
-  return { id: row.id, email: row.email, passwordHash: row.password_hash, apiKey: row.api_key, createdAt: row.created_at }
+  return {
+    id: row.id, email: row.email, passwordHash: row.password_hash,
+    apiKey: row.api_key, profileYml: row.profile_yml, portalsYml: row.portals_yml,
+    createdAt: row.created_at,
+  }
 }
 
 // ── Express app ──────────────────────────────────────────────────────────────
@@ -356,44 +365,54 @@ app.patch('/api/applications/:reportNumber/status', requireAuth, (req, res) => {
   }
 })
 
+function getProfileYml(user) {
+  if (user.profileYml) return user.profileYml
+  // fallback: read from workspace file (migration path)
+  try { return fs.readFileSync(path.join(getWorkspace(user.id), 'config', 'profile.yml'), 'utf8') } catch { return '' }
+}
+
+function getPortalsYml(user) {
+  if (user.portalsYml) return user.portalsYml
+  // fallback: read from workspace file or root portals.yml
+  try { return fs.readFileSync(path.join(getWorkspace(user.id), 'portals.yml'), 'utf8') } catch {}
+  try { return fs.readFileSync(path.join(ROOT, 'portals.yml'), 'utf8') } catch { return '' }
+}
+
 app.get('/api/profile', requireAuth, (req, res) => {
   try {
-    const content = fs.readFileSync(path.join(getWorkspace(req.user.id), 'config', 'profile.yml'), 'utf8')
-    res.json(yaml.load(content))
+    const content = getProfileYml(req.user)
+    res.json(content ? yaml.load(content) : {})
   } catch (e) { res.status(500).json({ error: e.message }) }
 })
 
 app.get('/api/profile/raw', requireAuth, (req, res) => {
-  try {
-    const content = fs.readFileSync(path.join(getWorkspace(req.user.id), 'config', 'profile.yml'), 'utf8')
-    res.json({ content })
-  } catch (e) { res.status(500).json({ error: e.message }) }
+  try { res.json({ content: getProfileYml(req.user) }) }
+  catch (e) { res.status(500).json({ error: e.message }) }
 })
 
-app.put('/api/profile', requireAuth, (req, res) => {
+app.put('/api/profile', requireAuth, async (req, res) => {
   const { content } = req.body
   if (typeof content !== 'string') return res.status(400).json({ error: 'content is required' })
   try {
     yaml.load(content)
-    fs.writeFileSync(path.join(getWorkspace(req.user.id), 'config', 'profile.yml'), content, 'utf8')
+    await setProfileYml(req.user.id, content)
     res.json({ ok: true })
   } catch (e) { res.status(400).json({ error: e.message }) }
 })
 
 app.get('/api/portals', requireAuth, (req, res) => {
   try {
-    const file = path.join(getWorkspace(req.user.id), 'portals.yml')
-    const content = fs.readFileSync(file, 'utf8')
-    res.json(yaml.load(content))
+    const content = getPortalsYml(req.user)
+    res.json(content ? yaml.load(content) : {})
   } catch (e) { res.status(500).json({ error: e.message }) }
 })
 
-app.put('/api/portals', requireAuth, (req, res) => {
+app.put('/api/portals', requireAuth, async (req, res) => {
   const { content } = req.body
   if (typeof content !== 'string') return res.status(400).json({ error: 'content is required' })
   try {
     yaml.load(content)
-    fs.writeFileSync(path.join(getWorkspace(req.user.id), 'portals.yml'), content, 'utf8')
+    await setPortalsYml(req.user.id, content)
     res.json({ ok: true })
   } catch (e) { res.status(400).json({ error: e.message }) }
 })
@@ -441,7 +460,14 @@ function makeJobEndpoints(name, buildPrompt) {
 
     send('status', `Starting ${name}…`)
 
-    const ws     = getWorkspace(req.user.id)
+    const ws = getWorkspace(req.user.id)
+
+    // write profile + portals from DB to workspace so claude -p can read them
+    const profileYml = getProfileYml(req.user)
+    const portalsYml = getPortalsYml(req.user)
+    if (profileYml) fs.writeFileSync(path.join(ws, 'config', 'profile.yml'), profileYml, 'utf8')
+    if (portalsYml) fs.writeFileSync(path.join(ws, 'portals.yml'), portalsYml, 'utf8')
+
     const prompt = buildPrompt(ws)
 
     const job = spawn('claude', ['-p', '--dangerously-skip-permissions'], {
