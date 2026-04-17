@@ -132,6 +132,7 @@ export default function ScanPanel({ mode = 'scan', onClose, onScanComplete }) {
             key={i}
             className={
               line.type === 'error'  ? 'text-rose-400' :
+              line.type === 'status' && line.text.startsWith('→') ? 'text-violet-400/80' :
               line.type === 'status' ? 'text-zinc-500 italic' :
               'text-zinc-300'
             }
