@@ -397,8 +397,13 @@ function applyStatusUpdate(content, reportNumber, newStatus) {
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }))
 
-app.get('/api/debug/claude-test', requireAuth, (req, res) => {
-  const ws = getWorkspace(req.user.id)
+app.get('/api/debug/claude-test', async (req, res) => {
+  // find first user for testing
+  const r = await pool.query('SELECT * FROM users LIMIT 1')
+  const user = toUser(r.rows[0])
+  if (!user?.apiKey) return res.json({ error: 'no user or api key found' })
+  ensureWorkspace(user.id)
+  const ws = getWorkspace(user.id)
   const job = spawn('claude', ['-p', '--dangerously-skip-permissions', '--model', 'claude-haiku-4-5-20251001', '--output-format', 'stream-json'], {
     cwd: ws,
     env: { ...process.env, ANTHROPIC_API_KEY: req.user.apiKey, NO_COLOR: '1', TERM: 'dumb' },
@@ -409,7 +414,7 @@ app.get('/api/debug/claude-test', requireAuth, (req, res) => {
   job.stdin.end()
   job.stdout.on('data', d => { stdout += d.toString() })
   job.stderr.on('data', d => { stderr += d.toString() })
-  job.on('close', code => res.json({ exitCode: code, stdoutBytes: stdout.length, stderrBytes: stderr.length, stdout: stdout.slice(0, 3000), stderr: stderr.slice(0, 3000) }))
+  job.on('close', code => res.json({ exitCode: code, stdoutBytes: stdout.length, stderrBytes: stderr.length, stdout: stdout.slice(0, 3000), stderr: stderr.slice(0, 3000), apiKeyPrefix: user.apiKey?.slice(0, 8) }))
   job.on('error', err => res.status(500).json({ spawnError: err.message }))
 })
 
