@@ -9,7 +9,8 @@ COPY . .
 RUN npm install -g @anthropic-ai/claude-code && \
     cd web && npm install && npm run build
 
-# Install Playwright Chromium browser + system deps (for PDF generation)
+# Install Playwright Chromium into /app/pw-browsers so chown covers it
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/pw-browsers
 RUN npx --prefix /app/web playwright install --with-deps chromium
 
 # Create a non-root user (required for claude --dangerously-skip-permissions)
