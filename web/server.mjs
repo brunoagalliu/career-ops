@@ -586,18 +586,17 @@ function makeJobEndpoints(name, buildPrompt, model = 'claude-sonnet-4-5', snapsh
     const ping     = setInterval(() => { if (!res.writableEnded) res.write(': ping\n\n') }, 20000)
     const detach   = () => { clearInterval(ping) }
 
-    // ── Reconnect to existing job ─────────────────────────────────────────────
+    // ── Reconnect to existing job (only if still running) ────────────────────
     const existing = activeJobs.get(jobKey)
-    if (existing) {
+    if (existing && !existing.done) {
+      // Job in progress — replay buffer and subscribe for new output
       for (const msg of existing.buffer) send(msg.type, msg.text)
-      if (existing.done) {
-        send('done', String(existing.exitCode ?? 0))
-        detach(); res.end(); return
-      }
       existing.subscribers.add(send)
       req.on('close', () => { existing.subscribers.delete(send); detach() })
       return
     }
+    // If job exists but is done, fall through to start a new one
+    if (existing?.done) activeJobs.delete(jobKey)
 
     // ── Start new job ─────────────────────────────────────────────────────────
     if (!req.user.apiKey) {
