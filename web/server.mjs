@@ -7,6 +7,7 @@ import { execFile, spawn } from 'child_process'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import { randomUUID } from 'crypto'
+import pg from 'pg'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT       = path.resolve(__dirname, '..')
@@ -17,27 +18,41 @@ const WORKSPACES = path.join(ROOT, 'workspaces')
 
 fs.mkdirSync(WORKSPACES, { recursive: true })
 
-const app = express()
-app.use(express.json())
+// ── Database ──────────────────────────────────────────────────────────────────
 
-if (isProd) {
-  app.use(express.static(path.join(__dirname, 'dist')))
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false })
+
+async function initDb() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id           TEXT PRIMARY KEY,
+      email        TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      api_key      TEXT NOT NULL DEFAULT '',
+      created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `)
 }
 
-// ── User store (JSON file) ────────────────────────────────────────────────────
-
-const USERS_FILE = path.join(WORKSPACES, '.users.json')
-
-function readUsers() {
-  try { return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8')) } catch { return [] }
+async function countUsers()          { const r = await pool.query('SELECT COUNT(*) FROM users'); return parseInt(r.rows[0].count, 10) }
+async function findUserByEmail(email){ const r = await pool.query('SELECT * FROM users WHERE email = $1', [email]); return r.rows[0] || null }
+async function findUserById(id)      { const r = await pool.query('SELECT * FROM users WHERE id = $1',    [id]);    return r.rows[0] || null }
+async function createUser({ id, email, passwordHash }) {
+  const r = await pool.query(
+    'INSERT INTO users (id, email, password_hash) VALUES ($1, $2, $3) RETURNING *',
+    [id, email, passwordHash]
+  )
+  return r.rows[0]
+}
+async function setApiKey(id, apiKey) {
+  await pool.query('UPDATE users SET api_key = $1 WHERE id = $2', [apiKey, id])
 }
 
-function writeUsers(users) {
-  fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2), 'utf8')
+// map snake_case DB row → camelCase object used throughout the server
+function toUser(row) {
+  if (!row) return null
+  return { id: row.id, email: row.email, passwordHash: row.password_hash, apiKey: row.api_key, createdAt: row.created_at }
 }
-
-function findUserByEmail(email) { return readUsers().find(u => u.email === email) }
-function findUserById(id)       { return readUsers().find(u => u.id === id) }
 
 // ── Workspace ─────────────────────────────────────────────────────────────────
 
@@ -104,13 +119,13 @@ function migrateExistingData(userId) {
 
 // ── Auth middleware ───────────────────────────────────────────────────────────
 
-function requireAuth(req, res, next) {
+async function requireAuth(req, res, next) {
   const header = req.headers.authorization
   const token  = (header?.startsWith('Bearer ') ? header.slice(7) : null) || req.query.token
   if (!token) return res.status(401).json({ error: 'Unauthorized' })
   try {
     const payload = jwt.verify(token, JWT_SECRET)
-    const user    = findUserById(payload.id)
+    const user    = toUser(await findUserById(payload.id))
     if (!user) return res.status(401).json({ error: 'User not found' })
     req.user = user
     next()
@@ -121,56 +136,61 @@ function requireAuth(req, res, next) {
 
 // ── Auth routes ───────────────────────────────────────────────────────────────
 
-app.get('/api/auth/status', (_req, res) => {
-  res.json({ needsSetup: readUsers().length === 0 })
+app.get('/api/auth/status', async (_req, res) => {
+  try {
+    res.json({ needsSetup: (await countUsers()) === 0 })
+  } catch (e) { res.status(500).json({ error: e.message }) }
 })
 
 app.post('/api/auth/setup', async (req, res) => {
-  if (readUsers().length > 0) return res.status(403).json({ error: 'Setup already complete' })
-  const { email, password } = req.body
-  if (!email || !password) return res.status(400).json({ error: 'email and password required' })
-  if (password.length < 8)  return res.status(400).json({ error: 'Password must be at least 8 characters' })
+  try {
+    if ((await countUsers()) > 0) return res.status(403).json({ error: 'Setup already complete' })
+    const { email, password } = req.body
+    if (!email || !password) return res.status(400).json({ error: 'email and password required' })
+    if (password.length < 8)  return res.status(400).json({ error: 'Password must be at least 8 characters' })
 
-  const id           = randomUUID()
-  const passwordHash = await bcrypt.hash(password, 12)
-  const user         = { id, email, passwordHash, apiKey: '', createdAt: new Date().toISOString() }
+    const id           = randomUUID()
+    const passwordHash = await bcrypt.hash(password, 12)
+    await createUser({ id, email, passwordHash })
 
-  ensureWorkspace(id)
-  migrateExistingData(id)
-  writeUsers([user])
+    ensureWorkspace(id)
+    migrateExistingData(id)
 
-  const token = jwt.sign({ id, email }, JWT_SECRET, { expiresIn: '30d' })
-  res.json({ token, user: { id, email, hasApiKey: false } })
+    const token = jwt.sign({ id, email }, JWT_SECRET, { expiresIn: '30d' })
+    res.json({ token, user: { id, email, hasApiKey: false } })
+  } catch (e) { res.status(500).json({ error: e.message }) }
 })
 
 app.post('/api/auth/register', async (req, res) => {
-  if (readUsers().length === 0) return res.status(403).json({ error: 'Use /api/auth/setup for first user' })
-  const { email, password } = req.body
-  if (!email || !password)     return res.status(400).json({ error: 'email and password required' })
-  if (password.length < 8)     return res.status(400).json({ error: 'Password must be at least 8 characters' })
-  if (findUserByEmail(email))  return res.status(409).json({ error: 'Email already registered' })
+  try {
+    if ((await countUsers()) === 0) return res.status(403).json({ error: 'Use /api/auth/setup for first user' })
+    const { email, password } = req.body
+    if (!email || !password)  return res.status(400).json({ error: 'email and password required' })
+    if (password.length < 8)  return res.status(400).json({ error: 'Password must be at least 8 characters' })
+    if (await findUserByEmail(email)) return res.status(409).json({ error: 'Email already registered' })
 
-  const id           = randomUUID()
-  const passwordHash = await bcrypt.hash(password, 12)
-  const user         = { id, email, passwordHash, apiKey: '', createdAt: new Date().toISOString() }
+    const id           = randomUUID()
+    const passwordHash = await bcrypt.hash(password, 12)
+    await createUser({ id, email, passwordHash })
+    ensureWorkspace(id)
 
-  ensureWorkspace(id)
-  writeUsers([...readUsers(), user])
-
-  const token = jwt.sign({ id, email }, JWT_SECRET, { expiresIn: '30d' })
-  res.json({ token, user: { id, email, hasApiKey: false } })
+    const token = jwt.sign({ id, email }, JWT_SECRET, { expiresIn: '30d' })
+    res.json({ token, user: { id, email, hasApiKey: false } })
+  } catch (e) { res.status(500).json({ error: e.message }) }
 })
 
 app.post('/api/auth/login', async (req, res) => {
-  const { email, password } = req.body
-  const user = findUserByEmail(email)
-  if (!user) return res.status(401).json({ error: 'Invalid email or password' })
+  try {
+    const { email, password } = req.body
+    const user = toUser(await findUserByEmail(email))
+    if (!user) return res.status(401).json({ error: 'Invalid email or password' })
 
-  const ok = await bcrypt.compare(password, user.passwordHash)
-  if (!ok) return res.status(401).json({ error: 'Invalid email or password' })
+    const ok = await bcrypt.compare(password, user.passwordHash)
+    if (!ok) return res.status(401).json({ error: 'Invalid email or password' })
 
-  const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '30d' })
-  res.json({ token, user: { id: user.id, email: user.email, hasApiKey: Boolean(user.apiKey) } })
+    const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '30d' })
+    res.json({ token, user: { id: user.id, email: user.email, hasApiKey: Boolean(user.apiKey) } })
+  } catch (e) { res.status(500).json({ error: e.message }) }
 })
 
 app.get('/api/auth/me', requireAuth, (req, res) => {
@@ -189,14 +209,12 @@ app.post('/api/auth/remigrate', requireAuth, (req, res) => {
 })
 
 app.put('/api/auth/apikey', requireAuth, async (req, res) => {
-  const { apiKey } = req.body
-  if (typeof apiKey !== 'string') return res.status(400).json({ error: 'apiKey required' })
-  const users = readUsers()
-  const idx   = users.findIndex(u => u.id === req.user.id)
-  if (idx === -1) return res.status(404).json({ error: 'User not found' })
-  users[idx].apiKey = apiKey
-  writeUsers(users)
-  res.json({ ok: true })
+  try {
+    const { apiKey } = req.body
+    if (typeof apiKey !== 'string') return res.status(400).json({ error: 'apiKey required' })
+    await setApiKey(req.user.id, apiKey)
+    res.json({ ok: true })
+  } catch (e) { res.status(500).json({ error: e.message }) }
 })
 
 // ── Parsers ───────────────────────────────────────────────────────────────────
@@ -515,6 +533,7 @@ if (isProd) {
   })
 }
 
+await initDb()
 app.listen(PORT, () => {
   console.log(`career-ops web → http://localhost:${PORT}`)
 })
