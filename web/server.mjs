@@ -397,7 +397,7 @@ function applyStatusUpdate(content, reportNumber, newStatus) {
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }))
 
-app.get('/api/debug/claude', requireAuth, (_req, res) => {
+app.get('/api/debug/claude', (_req, res) => {
   execFile('which', ['claude'], (err, stdout) => {
     const whichResult = err ? `not found: ${err.message}` : stdout.trim()
     execFile('claude', ['--version'], (err2, stdout2, stderr2) => {
