@@ -59,6 +59,12 @@ function toUser(row) {
   return { id: row.id, email: row.email, passwordHash: row.password_hash, apiKey: row.api_key, createdAt: row.created_at }
 }
 
+// ── Express app ──────────────────────────────────────────────────────────────
+
+const app = express()
+app.use(express.json())
+if (isProd) app.use(express.static(path.join(__dirname, 'dist')))
+
 // ── Workspace ─────────────────────────────────────────────────────────────────
 
 function getWorkspace(userId) { return path.join(WORKSPACES, userId) }
