@@ -139,6 +139,7 @@ async function requireAuth(req, res, next) {
     const user    = toUser(await findUserById(payload.id))
     if (!user) return res.status(401).json({ error: 'User not found' })
     req.user = user
+    ensureWorkspace(user.id)
     next()
   } catch {
     res.status(401).json({ error: 'Invalid token' })
@@ -321,12 +322,12 @@ app.get('/api/health', (_req, res) => res.json({ ok: true }))
 
 app.get('/api/applications', requireAuth, (req, res) => {
   try { res.json(parseApplications(getWorkspace(req.user.id))) }
-  catch (e) { res.status(500).json({ error: e.message }) }
+  catch { res.json([]) }
 })
 
 app.get('/api/metrics', requireAuth, (req, res) => {
   try { res.json(computeMetrics(parseApplications(getWorkspace(req.user.id)))) }
-  catch (e) { res.status(500).json({ error: e.message }) }
+  catch { res.json(computeMetrics([])) }
 })
 
 app.get('/api/report', requireAuth, (req, res) => {
