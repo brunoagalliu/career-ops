@@ -404,14 +404,13 @@ app.get('/api/debug/claude-test', async (req, res) => {
   if (!user?.apiKey) return res.json({ error: 'no user or api key found' })
   ensureWorkspace(user.id)
   const ws = getWorkspace(user.id)
-  const job = spawn('claude', ['-p', '--dangerously-skip-permissions', '--model', 'claude-haiku-4-5-20251001', '--output-format', 'stream-json'], {
+  const testPrompt = 'Say the word "hello" and nothing else.'
+  const job = spawn('claude', ['-p', testPrompt, '--dangerously-skip-permissions', '--model', 'claude-haiku-4-5-20251001', '--output-format', 'stream-json'], {
     cwd: ws,
     env: { ...process.env, ANTHROPIC_API_KEY: user.apiKey, NO_COLOR: '1', TERM: 'dumb' },
-    stdio: ['pipe', 'pipe', 'pipe'],
+    stdio: ['ignore', 'pipe', 'pipe'],
   })
   let stdout = '', stderr = ''
-  job.stdin.write('Say the word "hello" and nothing else.')
-  job.stdin.end()
   job.stdout.on('data', d => { stdout += d.toString() })
   job.stderr.on('data', d => { stderr += d.toString() })
   job.on('close', code => res.json({ exitCode: code, stdoutBytes: stdout.length, stderrBytes: stderr.length, stdout: stdout.slice(0, 3000), stderr: stderr.slice(0, 3000), apiKeyPrefix: user.apiKey?.slice(0, 8) }))
@@ -659,15 +658,13 @@ function makeJobEndpoints(name, buildPrompt, model = 'claude-sonnet-4-5', snapsh
 
       broadcast('status', `Workspace: ${ws}`)
 
-      const job = spawn('claude', ['-p', '--dangerously-skip-permissions', '--model', model, '--output-format', 'stream-json'], {
+      const job = spawn('claude', ['-p', prompt, '--dangerously-skip-permissions', '--model', model, '--output-format', 'stream-json'], {
         cwd: ws,
         env: { ...process.env, ANTHROPIC_API_KEY: req.user.apiKey, NO_COLOR: '1', TERM: 'dumb' },
-        stdio: ['pipe', 'pipe', 'pipe'],
+        stdio: ['ignore', 'pipe', 'pipe'],
       })
       state.job = job
       broadcast('status', `claude pid ${job.pid ?? 'unknown'}`)
-      job.stdin.write(prompt)
-      job.stdin.end()
 
       // claude -p with stream-json: each line is a JSON event (NDJSON)
       let lineBuf = ''
