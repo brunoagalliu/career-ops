@@ -397,6 +397,22 @@ function applyStatusUpdate(content, reportNumber, newStatus) {
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }))
 
+app.get('/api/debug/claude-test', requireAuth, (req, res) => {
+  const ws = getWorkspace(req.user.id)
+  const job = spawn('claude', ['-p', '--dangerously-skip-permissions', '--model', 'claude-haiku-4-5-20251001', '--output-format', 'stream-json'], {
+    cwd: ws,
+    env: { ...process.env, ANTHROPIC_API_KEY: req.user.apiKey, NO_COLOR: '1', TERM: 'dumb' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  let stdout = '', stderr = ''
+  job.stdin.write('Say the word "hello" and nothing else.')
+  job.stdin.end()
+  job.stdout.on('data', d => { stdout += d.toString() })
+  job.stderr.on('data', d => { stderr += d.toString() })
+  job.on('close', code => res.json({ exitCode: code, stdoutBytes: stdout.length, stderrBytes: stderr.length, stdout: stdout.slice(0, 3000), stderr: stderr.slice(0, 3000) }))
+  job.on('error', err => res.status(500).json({ spawnError: err.message }))
+})
+
 app.get('/api/debug/claude', (_req, res) => {
   execFile('which', ['claude'], (err, stdout) => {
     const whichResult = err ? `not found: ${err.message}` : stdout.trim()
