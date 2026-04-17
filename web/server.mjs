@@ -39,9 +39,17 @@ async function initDb() {
       created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `)
-  // migrate existing tables that predate these columns
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_yml TEXT NOT NULL DEFAULT ''`)
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS portals_yml TEXT NOT NULL DEFAULT ''`)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_files (
+      user_id    TEXT NOT NULL,
+      path       TEXT NOT NULL,
+      content    TEXT NOT NULL DEFAULT '',
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (user_id, path)
+    )
+  `)
 }
 
 async function countUsers()          { const r = await pool.query('SELECT COUNT(*) FROM users'); return parseInt(r.rows[0].count, 10) }
@@ -54,9 +62,29 @@ async function createUser({ id, email, passwordHash }) {
   )
   return r.rows[0]
 }
-async function setApiKey(id, apiKey)       { await pool.query('UPDATE users SET api_key    = $1 WHERE id = $2', [apiKey,   id]) }
-async function setProfileYml(id, yml)      { await pool.query('UPDATE users SET profile_yml = $1 WHERE id = $2', [yml,     id]) }
-async function setPortalsYml(id, yml)      { await pool.query('UPDATE users SET portals_yml = $1 WHERE id = $2', [yml,     id]) }
+async function setApiKey(id, apiKey)  { await pool.query('UPDATE users SET api_key    = $1 WHERE id = $2', [apiKey, id]) }
+async function setProfileYml(id, yml) { await pool.query('UPDATE users SET profile_yml = $1 WHERE id = $2', [yml,    id]) }
+async function setPortalsYml(id, yml) { await pool.query('UPDATE users SET portals_yml = $1 WHERE id = $2', [yml,    id]) }
+
+// ── File store ────────────────────────────────────────────────────────────────
+
+async function saveFile(userId, filePath, content) {
+  await pool.query(`
+    INSERT INTO user_files (user_id, path, content, updated_at)
+    VALUES ($1, $2, $3, NOW())
+    ON CONFLICT (user_id, path) DO UPDATE SET content = EXCLUDED.content, updated_at = NOW()
+  `, [userId, filePath, content])
+}
+
+async function getFile(userId, filePath) {
+  const r = await pool.query('SELECT content FROM user_files WHERE user_id = $1 AND path = $2', [userId, filePath])
+  return r.rows[0]?.content ?? null
+}
+
+async function getAllFiles(userId) {
+  const r = await pool.query('SELECT path, content FROM user_files WHERE user_id = $1', [userId])
+  return r.rows
+}
 
 // map snake_case DB row → camelCase object used throughout the server
 function toUser(row) {
@@ -111,30 +139,64 @@ function ensureWorkspace(userId) {
   }
 }
 
-function migrateExistingData(userId) {
-  const ws = getWorkspace(userId)
-
-  // data files — always overwrite so real data wins over example placeholders
+async function migrateExistingData(userId) {
+  // data files
   for (const f of ['applications.md', 'pipeline.md', 'scan-history.tsv']) {
     const src = path.join(ROOT, 'data', f)
-    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(ws, 'data', f))
+    if (fs.existsSync(src)) {
+      const content = fs.readFileSync(src, 'utf8')
+      await saveFile(userId, `data/${f}`, content)
+    }
   }
-
+  // profile
   const ps = path.join(ROOT, 'config', 'profile.yml')
-  if (fs.existsSync(ps)) fs.copyFileSync(ps, path.join(ws, 'config', 'profile.yml'))
-
+  if (fs.existsSync(ps)) await setProfileYml(userId, fs.readFileSync(ps, 'utf8'))
+  // portals
+  const portals = path.join(ROOT, 'portals.yml')
+  if (fs.existsSync(portals)) await setPortalsYml(userId, fs.readFileSync(portals, 'utf8'))
+  // modes/_profile.md
   const ms = path.join(ROOT, 'modes', '_profile.md')
-  if (fs.existsSync(ms)) fs.copyFileSync(ms, path.join(ws, 'modes', '_profile.md'))
-
+  if (fs.existsSync(ms)) await saveFile(userId, 'modes/_profile.md', fs.readFileSync(ms, 'utf8'))
+  // reports
   const rs = path.join(ROOT, 'reports')
   if (fs.existsSync(rs)) {
     for (const f of fs.readdirSync(rs)) {
-      fs.copyFileSync(path.join(rs, f), path.join(ws, 'reports', f))
+      if (f.endsWith('.md')) await saveFile(userId, `reports/${f}`, fs.readFileSync(path.join(rs, f), 'utf8'))
     }
   }
+}
 
-  const portals = path.join(ROOT, 'portals.yml')
-  if (fs.existsSync(portals)) fs.copyFileSync(portals, path.join(ws, 'portals.yml'))
+// Write all DB files to workspace filesystem (before claude job)
+async function syncDbToWorkspace(userId) {
+  const ws    = getWorkspace(userId)
+  const files = await getAllFiles(userId)
+  for (const { path: p, content } of files) {
+    const full = path.join(ws, p)
+    fs.mkdirSync(path.dirname(full), { recursive: true })
+    fs.writeFileSync(full, content, 'utf8')
+  }
+  // also write profile and portals from users columns
+  const user = toUser(await findUserById(userId))
+  if (user?.profileYml) fs.writeFileSync(path.join(ws, 'config', 'profile.yml'), user.profileYml, 'utf8')
+  if (user?.portalsYml) fs.writeFileSync(path.join(ws, 'portals.yml'), user.portalsYml, 'utf8')
+}
+
+// Read workspace files back to DB (after claude job)
+async function syncWorkspaceToDb(userId) {
+  const ws = getWorkspace(userId)
+  const TRACKED = ['data/applications.md', 'data/pipeline.md', 'data/scan-history.tsv']
+  for (const rel of TRACKED) {
+    try { await saveFile(userId, rel, fs.readFileSync(path.join(ws, rel), 'utf8')) } catch {}
+  }
+  for (const dir of ['reports', path.join('batch', 'tracker-additions')]) {
+    const full = path.join(ws, dir)
+    if (!fs.existsSync(full)) continue
+    for (const f of fs.readdirSync(full)) {
+      if (f.endsWith('.md') || f.endsWith('.tsv')) {
+        try { await saveFile(userId, `${dir}/${f}`, fs.readFileSync(path.join(full, f), 'utf8')) } catch {}
+      }
+    }
+  }
 }
 
 // ── Auth middleware ───────────────────────────────────────────────────────────
@@ -175,7 +237,7 @@ app.post('/api/auth/setup', async (req, res) => {
     await createUser({ id, email, passwordHash })
 
     ensureWorkspace(id)
-    migrateExistingData(id)
+    await migrateExistingData(id)
 
     const token = jwt.sign({ id, email }, JWT_SECRET, { expiresIn: '30d' })
     res.json({ token, user: { id, email, hasApiKey: false } })
@@ -220,9 +282,9 @@ app.get('/api/auth/me', requireAuth, (req, res) => {
 })
 
 // Re-run migration for current user (idempotent — safe to call anytime)
-app.post('/api/auth/remigrate', requireAuth, (req, res) => {
+app.post('/api/auth/remigrate', requireAuth, async (req, res) => {
   try {
-    migrateExistingData(req.user.id)
+    await migrateExistingData(req.user.id)
     res.json({ ok: true })
   } catch (e) {
     res.status(500).json({ error: e.message })
@@ -253,11 +315,8 @@ function normalizeStatus(raw) {
   return (raw || '').trim()
 }
 
-function parseApplications(ws) {
-  const filePath = path.join(ws, 'data', 'applications.md')
-  const content  = fs.readFileSync(filePath, 'utf8')
-  const apps     = []
-
+function parseApplicationsContent(content) {
+  const apps = []
   for (const line of content.split('\n')) {
     const trimmed = line.trim()
     if (!trimmed.startsWith('|')) continue
@@ -307,12 +366,9 @@ function computeMetrics(apps) {
   }
 }
 
-function updateStatusInFile(ws, reportNumber, newStatus) {
-  const filePath = path.join(ws, 'data', 'applications.md')
-  const content  = fs.readFileSync(filePath, 'utf8')
-  const lines    = content.split('\n')
+function applyStatusUpdate(content, reportNumber, newStatus) {
+  const lines = content.split('\n')
   let found = false
-
   for (let i = 0; i < lines.length; i++) {
     if (lines[i].includes(`[${reportNumber}](`)) {
       const parts = lines[i].split('|')
@@ -320,45 +376,52 @@ function updateStatusInFile(ws, reportNumber, newStatus) {
       break
     }
   }
-
   if (!found) throw new Error(`Application ${reportNumber} not found`)
-  fs.writeFileSync(filePath, lines.join('\n'), 'utf8')
+  return lines.join('\n')
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }))
 
-app.get('/api/applications', requireAuth, (req, res) => {
-  try { res.json(parseApplications(getWorkspace(req.user.id))) }
-  catch { res.json([]) }
+app.get('/api/applications', requireAuth, async (req, res) => {
+  try {
+    const content = await getFile(req.user.id, 'data/applications.md')
+    res.json(content ? parseApplicationsContent(content) : [])
+  } catch { res.json([]) }
 })
 
-app.get('/api/metrics', requireAuth, (req, res) => {
-  try { res.json(computeMetrics(parseApplications(getWorkspace(req.user.id)))) }
-  catch { res.json(computeMetrics([])) }
+app.get('/api/metrics', requireAuth, async (req, res) => {
+  try {
+    const content = await getFile(req.user.id, 'data/applications.md')
+    res.json(computeMetrics(content ? parseApplicationsContent(content) : []))
+  } catch { res.json(computeMetrics([])) }
 })
 
-app.get('/api/report', requireAuth, (req, res) => {
+app.get('/api/report', requireAuth, async (req, res) => {
   const reportPath = req.query.path
   if (!reportPath || !/^reports\/[\w.-]+\.md$/.test(reportPath)) {
     return res.status(403).json({ error: 'Invalid path' })
   }
   try {
-    const content = fs.readFileSync(path.join(getWorkspace(req.user.id), reportPath), 'utf8')
-    res.json({ content })
+    const content = await getFile(req.user.id, reportPath)
+    if (content !== null) return res.json({ content })
+    res.status(404).json({ error: 'Report not found' })
   } catch (e) {
     res.status(404).json({ error: 'Report not found' })
   }
 })
 
-app.patch('/api/applications/:reportNumber/status', requireAuth, (req, res) => {
+app.patch('/api/applications/:reportNumber/status', requireAuth, async (req, res) => {
   const { reportNumber } = req.params
   const { newStatus }    = req.body
   const VALID = ['Evaluated', 'Applied', 'Responded', 'Interview', 'Offer', 'Rejected', 'Discarded', 'SKIP']
   if (!VALID.includes(newStatus)) return res.status(400).json({ error: 'Invalid status' })
   try {
-    updateStatusInFile(getWorkspace(req.user.id), reportNumber, newStatus)
+    const content = await getFile(req.user.id, 'data/applications.md')
+    if (!content) return res.status(404).json({ error: 'Tracker not found' })
+    const updated = applyStatusUpdate(content, reportNumber, newStatus)
+    await saveFile(req.user.id, 'data/applications.md', updated)
     res.json({ ok: true })
   } catch (e) {
     res.status(404).json({ error: e.message })
@@ -443,7 +506,7 @@ function makeJobEndpoints(name, buildPrompt) {
     res.json({ running: activeJobs.has(key(req.user.id)), available: Boolean(req.user.apiKey) })
   }
 
-  const startHandler = (req, res) => {
+  const startHandler = async (req, res) => {
     const jobKey = key(req.user.id)
     if (!req.user.apiKey) {
       return res.status(503).json({ error: 'No API key set. Add it in Settings.' })
@@ -462,11 +525,8 @@ function makeJobEndpoints(name, buildPrompt) {
 
     const ws = getWorkspace(req.user.id)
 
-    // write profile + portals from DB to workspace so claude -p can read them
-    const profileYml = getProfileYml(req.user)
-    const portalsYml = getPortalsYml(req.user)
-    if (profileYml) fs.writeFileSync(path.join(ws, 'config', 'profile.yml'), profileYml, 'utf8')
-    if (portalsYml) fs.writeFileSync(path.join(ws, 'portals.yml'), portalsYml, 'utf8')
+    // sync all user files from DB to workspace before claude runs
+    await syncDbToWorkspace(req.user.id)
 
     const prompt = buildPrompt(ws)
 
@@ -487,8 +547,10 @@ function makeJobEndpoints(name, buildPrompt) {
       const text = stripAnsi(chunk.toString())
       if (text.trim()) send('error', text)
     })
-    job.on('close', (code) => {
+    job.on('close', async (code) => {
       clearInterval(keepalive); activeJobs.delete(jobKey)
+      // sync workspace files back to DB after claude finishes
+      try { await syncWorkspaceToDb(req.user.id) } catch {}
       send('done', String(code ?? 0)); res.end()
     })
     job.on('error', (err) => {
