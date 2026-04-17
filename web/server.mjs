@@ -648,31 +648,37 @@ function makeJobEndpoints(name, buildPrompt, model = 'claude-sonnet-4-5', snapsh
       job.stdin.write(prompt)
       job.stdin.end()
 
-      // claude -p with stream-json: each line is a JSON event
+      // claude -p with stream-json: each line is a JSON event (NDJSON)
       let lineBuf = ''
+
+      function processJsonLine(raw) {
+        if (!raw.trim()) return
+        try {
+          const ev = JSON.parse(raw)
+          if (ev.type === 'assistant') {
+            for (const block of (ev.message?.content || [])) {
+              if (block.type === 'text' && block.text?.trim()) broadcast('output', block.text)
+            }
+          } else if (ev.type === 'result') {
+            if (ev.result?.trim()) broadcast('output', ev.result)
+            const cost = ev.total_cost_usd ?? ev.cost_usd
+            if (cost != null) broadcast('status', `Cost: $${Number(cost).toFixed(4)}`)
+          }
+        } catch {
+          if (raw.trim()) broadcast('output', raw)
+        }
+      }
+
       job.stdout.on('data', chunk => {
         lineBuf += stripAnsi(chunk.toString())
         const parts = lineBuf.split('\n')
-        lineBuf = parts.pop() || ''
-        for (const line of parts) {
-          const raw = line.trim()
-          if (!raw) continue
-          try {
-            const ev = JSON.parse(raw)
-            if (ev.type === 'assistant') {
-              for (const block of (ev.message?.content || [])) {
-                if (block.type === 'text' && block.text?.trim()) broadcast('output', block.text)
-              }
-            } else if (ev.type === 'result') {
-              if (ev.result?.trim()) broadcast('output', ev.result)
-              const cost = ev.total_cost_usd ?? ev.cost_usd
-              if (cost != null) broadcast('status', `Cost: $${Number(cost).toFixed(4)}`)
-            }
-          } catch {
-            if (raw) broadcast('output', raw)
-          }
-        }
+        lineBuf = parts.pop() || ''           // keep incomplete last line
+        for (const line of parts) processJsonLine(line)
       })
+
+      // flush anything left in the buffer when stdout closes
+      job.stdout.on('end', () => { if (lineBuf.trim()) { processJsonLine(lineBuf); lineBuf = '' } })
+
       job.stderr.on('data', chunk => { const t = stripAnsi(chunk.toString()); if (t.trim()) broadcast('error', t) })
 
       // progress polling
