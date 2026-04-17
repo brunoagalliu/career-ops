@@ -398,23 +398,31 @@ function applyStatusUpdate(content, reportNumber, newStatus) {
 app.get('/api/health', (_req, res) => res.json({ ok: true }))
 
 app.get('/api/debug/claude-test', async (req, res) => {
-  // find first user for testing
   const r = await pool.query('SELECT * FROM users LIMIT 1')
   const user = toUser(r.rows[0])
   if (!user?.apiKey) return res.json({ error: 'no user or api key found' })
   ensureWorkspace(user.id)
   const ws = getWorkspace(user.id)
-  const testPrompt = 'Say the word "hello" and nothing else.'
-  const job = spawn('claude', ['-p', testPrompt, '--dangerously-skip-permissions', '--model', 'claude-haiku-4-5-20251001', '--output-format', 'stream-json'], {
-    cwd: ws,
-    env: { ...process.env, ANTHROPIC_API_KEY: user.apiKey, NO_COLOR: '1', TERM: 'dumb' },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
-  let stdout = '', stderr = ''
-  job.stdout.on('data', d => { stdout += d.toString() })
-  job.stderr.on('data', d => { stderr += d.toString() })
-  job.on('close', code => res.json({ exitCode: code, stdoutBytes: stdout.length, stderrBytes: stderr.length, stdout: stdout.slice(0, 3000), stderr: stderr.slice(0, 3000), apiKeyPrefix: user.apiKey?.slice(0, 8) }))
-  job.on('error', err => res.status(500).json({ spawnError: err.message }))
+  const env = { ...process.env, ANTHROPIC_API_KEY: user.apiKey, NO_COLOR: '1', TERM: 'dumb' }
+  const prompt = 'Say the word hello and nothing else.'
+
+  // Test 1: execFile plain text
+  execFile('claude', ['-p', prompt, '--model', 'claude-haiku-4-5-20251001'],
+    { env, cwd: ws, timeout: 60000 },
+    (err1, stdout1, stderr1) => {
+      // Test 2: execFile stream-json
+      execFile('claude', ['-p', prompt, '--model', 'claude-haiku-4-5-20251001', '--output-format', 'stream-json'],
+        { env, cwd: ws, timeout: 60000 },
+        (err2, stdout2, stderr2) => {
+          res.json({
+            apiKeyPrefix: user.apiKey?.slice(0, 8),
+            plainText:   { exitCode: err1?.code ?? 0, stdoutBytes: stdout1?.length ?? 0, stdout: stdout1?.slice(0, 500), stderr: stderr1?.slice(0, 500), err: err1?.message },
+            streamJson:  { exitCode: err2?.code ?? 0, stdoutBytes: stdout2?.length ?? 0, stdout: stdout2?.slice(0, 500), stderr: stderr2?.slice(0, 500), err: err2?.message },
+          })
+        }
+      )
+    }
+  )
 })
 
 app.get('/api/debug/claude', (_req, res) => {
