@@ -528,7 +528,40 @@ function stripAnsi(str) {
 // activeJobs: jobKey → { job, buffer, done, exitCode, subscribers }
 const activeJobs = new Map()
 
-function makeJobEndpoints(name, buildPrompt, model = 'claude-sonnet-4-5') {
+// ── Progress helpers ──────────────────────────────────────────────────────────
+
+function pipelineProgressSnapshot(ws) {
+  try {
+    const tsvDir = path.join(ws, 'batch', 'tracker-additions')
+    const done = fs.existsSync(tsvDir)
+      ? fs.readdirSync(tsvDir).filter(f => f.endsWith('.tsv') && !f.startsWith('.')).length
+      : 0
+    const pipelineMd = path.join(ws, 'data', 'pipeline.md')
+    const total = fs.existsSync(pipelineMd)
+      ? fs.readFileSync(pipelineMd, 'utf8').split('\n')
+          .filter(l => { const t = l.trim(); return t && !t.startsWith('#') }).length
+      : 0
+    return { done, total }
+  } catch { return null }
+}
+
+function scanProgressSnapshot(ws) {
+  try {
+    const portalsFile = path.join(ws, 'portals.yml')
+    const portals = fs.existsSync(portalsFile) ? yaml.load(fs.readFileSync(portalsFile, 'utf8')) : {}
+    const total = [
+      ...(portals.search_queries    || []).filter(q => q.enabled !== false),
+      ...(portals.tracked_companies || []).filter(c => c.enabled !== false),
+    ].length
+    const histFile = path.join(ws, 'data', 'scan-history.tsv')
+    const done = fs.existsSync(histFile)
+      ? fs.readFileSync(histFile, 'utf8').split('\n').filter(l => l.trim()).length
+      : 0
+    return { done, total }
+  } catch { return null }
+}
+
+function makeJobEndpoints(name, buildPrompt, model = 'claude-sonnet-4-5', snapshotFn = null) {
   const key = (userId) => `${name}:${userId}`
 
   const statusHandler = (req, res) => {
@@ -602,7 +635,23 @@ function makeJobEndpoints(name, buildPrompt, model = 'claude-sonnet-4-5') {
       job.stdout.on('data', chunk => { const t = stripAnsi(chunk.toString()); if (t.trim()) broadcast('output', t) })
       job.stderr.on('data', chunk => { const t = stripAnsi(chunk.toString()); if (t.trim()) broadcast('error',  t) })
 
+      // progress polling
+      let progressTimer = null
+      if (snapshotFn) {
+        const baseline = snapshotFn(ws)
+        if (baseline) {
+          broadcast('progress', JSON.stringify({ current: 0, total: baseline.total }))
+          progressTimer = setInterval(() => {
+            const snap = snapshotFn(ws)
+            if (!snap) return
+            const current = Math.max(0, snap.done - baseline.done)
+            broadcast('progress', JSON.stringify({ current, total: baseline.total }))
+          }, 2000)
+        }
+      }
+
       job.on('close', async (code) => {
+        if (progressTimer) clearInterval(progressTimer)
         try { await syncWorkspaceToDb(req.user.id) } catch {}
         state.done = true; state.exitCode = code ?? 0
         broadcast('done', String(state.exitCode))
@@ -610,6 +659,7 @@ function makeJobEndpoints(name, buildPrompt, model = 'claude-sonnet-4-5') {
         setTimeout(() => { if (activeJobs.get(jobKey) === state) activeJobs.delete(jobKey) }, 10 * 60 * 1000)
       })
       job.on('error', (err) => {
+        if (progressTimer) clearInterval(progressTimer)
         state.done = true; state.exitCode = 1
         broadcast('error', `Failed to start: ${err.message}`)
         broadcast('done', '1')
@@ -655,7 +705,7 @@ function buildScanPrompt(ws) {
   ].join('\n')
 }
 
-const scan = makeJobEndpoints('scan', buildScanPrompt, 'claude-haiku-4-5-20251001')
+const scan = makeJobEndpoints('scan', buildScanPrompt, 'claude-haiku-4-5-20251001', scanProgressSnapshot)
 app.get('/api/scan/status', requireAuth, scan.statusHandler)
 app.get('/api/scan',        requireAuth, scan.startHandler)
 app.delete('/api/scan',     requireAuth, scan.stopHandler)
@@ -681,7 +731,7 @@ function buildPipelinePrompt(ws) {
   ].join('\n')
 }
 
-const pipeline = makeJobEndpoints('pipeline', buildPipelinePrompt, 'claude-haiku-4-5-20251001')
+const pipeline = makeJobEndpoints('pipeline', buildPipelinePrompt, 'claude-haiku-4-5-20251001', pipelineProgressSnapshot)
 app.get('/api/pipeline/status', requireAuth, pipeline.statusHandler)
 app.get('/api/pipeline',        requireAuth, pipeline.startHandler)
 app.delete('/api/pipeline',     requireAuth, pipeline.stopHandler)
