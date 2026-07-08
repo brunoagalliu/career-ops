@@ -1,16 +1,22 @@
 import { useState } from 'react'
 import { authFetch, clearToken } from '../api.js'
 
+const KEY_MASK = '•'.repeat(28)
+
 export default function Settings({ user, onLogout, onSaved }) {
   const [apiKey, setApiKey]         = useState('')
+  const [editingKey, setEditingKey] = useState(false)
   const [saving, setSaving]         = useState(false)
   const [saved, setSaved]           = useState(false)
   const [error, setError]           = useState(null)
   const [migrating, setMigrating]   = useState(false)
   const [migrateMsg, setMigrateMsg] = useState(null)
 
+  const showMask = user.hasApiKey && !editingKey
+
   async function handleSave(e) {
     e.preventDefault()
+    if (!apiKey) return
     setSaving(true); setError(null); setSaved(false)
     try {
       const res  = await authFetch('/api/auth/apikey', {
@@ -22,6 +28,7 @@ export default function Settings({ user, onLogout, onSaved }) {
       if (!res.ok) throw new Error(data.error)
       setSaved(true)
       setApiKey('')
+      setEditingKey(false)
       onSaved?.()
       setTimeout(() => setSaved(false), 3000)
     } catch (e) {
@@ -29,6 +36,17 @@ export default function Settings({ user, onLogout, onSaved }) {
     } finally {
       setSaving(false)
     }
+  }
+
+  function handleKeyFocus() {
+    if (user.hasApiKey && !editingKey) {
+      setEditingKey(true)
+      setApiKey('')
+    }
+  }
+
+  function handleKeyBlur() {
+    if (user.hasApiKey && !apiKey) setEditingKey(false)
   }
 
   async function handleRemigrate() {
@@ -92,12 +110,15 @@ export default function Settings({ user, onLogout, onSaved }) {
         <form onSubmit={handleSave} className="space-y-3">
           <input
             type="password"
-            value={apiKey}
+            value={showMask ? KEY_MASK : apiKey}
+            onFocus={handleKeyFocus}
+            onBlur={handleKeyBlur}
             onChange={e => setApiKey(e.target.value)}
             placeholder="sk-ant-…"
             required
             className="w-full bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-zinc-500 font-mono"
           />
+          {showMask && <p className="text-xs text-zinc-600">A key is saved. Click the field to enter a new one.</p>}
           {error && <p className="text-xs text-rose-400">{error}</p>}
           <button
             type="submit"
