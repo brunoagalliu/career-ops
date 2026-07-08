@@ -632,7 +632,10 @@ function pipelineProgressSnapshot(ws) {
     const lines = fs.readFileSync(pipelineMd, 'utf8').split('\n')
     const pending   = lines.filter(l => /^\s*- \[ \]/.test(l)).length
     const processed = lines.filter(l => /^\s*- \[(?:x|!|X)\]/.test(l)).length
-    return { done: processed, total: pending + processed }
+    // `total` is what's actually queued for this run, not all-time processed
+    // history — otherwise the progress bar never shrinks even after the
+    // queue is cleared, since old processed entries keep inflating it.
+    return { done: processed, total: pending }
   } catch { return null }
 }
 
