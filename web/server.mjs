@@ -952,10 +952,9 @@ Before scoring, read \`cv.md\` in the working directory for the candidate's full
 2. Read \`reports/\` directory listing to find the highest existing report number (next = max + 1).
 3. For each pending URL (process one at a time, print progress):
    a. Print "→ Processing N/10: URL"
-   b. Fetch the job description using this priority order:
-      1. Playwright: browser_navigate to the URL, then browser_snapshot to read rendered content (handles JS-heavy boards like Greenhouse, Lever, Ashby)
-      2. WebFetch: fallback if Playwright fails or returns empty content
-      3. WebSearch: last resort — search "[company] [role] site:jobs.example.com" to find cached content
+   b. Fetch the job description using this priority order (no browser tool is available in this environment — do NOT attempt Playwright/browser_navigate):
+      1. WebFetch the URL directly.
+      2. WebSearch as fallback — search "[company] [role] site:jobs.example.com" to find cached content if WebFetch fails or returns empty.
       If all methods fail or return a 404/login-wall, mark as inaccessible.
    c. Score it 1–5 against the candidate profile above. Write a concise evaluation.
    d. Write report to \`reports/{NNN}-{company-slug}-${today}.md\`:
@@ -963,6 +962,7 @@ Before scoring, read \`cv.md\` in the working directory for the candidate's full
       # {Role} — {Company}
       **Score:** {X.X}/5
       **URL:** {url}
+      **Verification:** unconfirmed (batch mode)
       **PDF:** ❌
       **Date:** ${today}
 
@@ -983,7 +983,12 @@ Print "→ Processing N/10: Company — Role (X.X/5)" after scoring each offer.`
 async function runMergeTracker(ws, broadcast) {
   broadcast('status', 'Merging tracker additions…')
   await new Promise((resolve, reject) => {
-    execFile('node', [path.join(ROOT, 'merge-tracker.mjs'), `--root=${ws}`], { cwd: ws, timeout: 30000 }, (err, stdout, stderr) => {
+    const env = {
+      ...process.env,
+      CAREER_OPS_TRACKER: path.join(ws, 'data', 'applications.md'),
+      CAREER_OPS_ADDITIONS: path.join(ws, 'batch', 'tracker-additions'),
+    }
+    execFile('node', [path.join(ROOT, 'merge-tracker.mjs')], { cwd: ws, env, timeout: 30000 }, (err, stdout, stderr) => {
       if (stdout?.trim()) broadcast('status', stdout.trim().split('\n').pop())
       if (err) { broadcast('error', `merge-tracker: ${err.message}`); reject(err) } else resolve()
     })
