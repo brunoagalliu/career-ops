@@ -18,7 +18,8 @@ import { readFileSync, writeFileSync, readdirSync, mkdirSync, renameSync, exists
 import { join, basename, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
-const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
+const rootArg = process.argv.find(a => a.startsWith('--root='));
+const CAREER_OPS = rootArg ? rootArg.slice(7) : dirname(fileURLToPath(import.meta.url));
 // Support both layouts: data/applications.md (boilerplate) and applications.md (original)
 const APPS_FILE = existsSync(join(CAREER_OPS, 'data/applications.md'))
   ? join(CAREER_OPS, 'data/applications.md')

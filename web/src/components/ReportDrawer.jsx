@@ -23,10 +23,12 @@ function scoreColor(score) {
 }
 
 export default function ReportDrawer({ app, onClose, onStatusUpdate }) {
-  const [content, setContent]   = useState(null)
-  const [loading, setLoading]   = useState(true)
-  const [updating, setUpdating] = useState(false)
-  const [toast, setToast]       = useState(null)
+  const [content, setContent]       = useState(null)
+  const [loading, setLoading]       = useState(true)
+  const [updating, setUpdating]     = useState(false)
+  const [toast, setToast]           = useState(null)
+  const [applyLoading, setApply]    = useState(false)
+  const [coverLetter, setCoverLetter] = useState(null)
   const scrollRef = useRef(null)
 
   useEffect(() => {
@@ -44,6 +46,27 @@ export default function ReportDrawer({ app, onClose, onStatusUpdate }) {
   useEffect(() => {
     scrollRef.current?.scrollTo(0, 0)
   }, [app.reportNumber])
+
+  async function handleApplyPack() {
+    setApply(true)
+    setCoverLetter(null)
+    try {
+      const r = await authFetch(`/api/apply/${app.reportNumber}`, { method: 'POST' })
+      const data = await r.json()
+      if (!r.ok) { showToast(data.error || 'Failed'); return }
+      setCoverLetter(data.coverLetter)
+      // Also download CV PDF
+      const cvRes = await authFetch('/api/cv/pdf')
+      if (cvRes.ok) {
+        const blob = await cvRes.blob()
+        const url  = URL.createObjectURL(blob)
+        const a    = document.createElement('a')
+        a.href = url; a.download = 'cv.pdf'; a.click()
+        URL.revokeObjectURL(url)
+      }
+    } catch (e) { showToast(e.message) }
+    finally { setApply(false) }
+  }
 
   async function handleStatusChange(newStatus) {
     if (newStatus === app.status || !app.reportNumber) return
@@ -91,7 +114,18 @@ export default function ReportDrawer({ app, onClose, onStatusUpdate }) {
         <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border ${STATUS_STYLES[app.status] || 'bg-zinc-800 text-zinc-400 border-zinc-700'}`}>
           {app.status}
         </span>
-        <div className="ml-auto">
+        <div className="ml-auto flex items-center gap-2">
+          {app.reportNumber && (
+            <button
+              onClick={handleApplyPack}
+              disabled={applyLoading}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors bg-violet-600/20 text-violet-300 border border-violet-500/40 hover:bg-violet-600/30 hover:border-violet-400/60 disabled:opacity-50"
+            >
+              {applyLoading
+                ? <span className="inline-block w-3 h-3 border border-violet-400 border-t-transparent rounded-full animate-spin" />
+                : '✦'} Apply Pack
+            </button>
+          )}
           <select
             value={app.status}
             onChange={e => handleStatusChange(e.target.value)}
@@ -117,6 +151,24 @@ export default function ReportDrawer({ app, onClose, onStatusUpdate }) {
           </div>
         )}
       </div>
+
+      {/* Cover letter */}
+      {coverLetter && (
+        <div className="border-t border-zinc-800 flex-shrink-0">
+          <div className="flex items-center justify-between px-4 py-2 border-b border-zinc-800/50">
+            <span className="text-xs font-medium text-violet-400">Cover Letter</span>
+            <button
+              onClick={() => { navigator.clipboard.writeText(coverLetter); showToast('Copied!') }}
+              className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors px-2 py-0.5 rounded border border-zinc-700 hover:border-zinc-500"
+            >
+              Copy
+            </button>
+          </div>
+          <div className="px-4 py-3 max-h-64 overflow-y-auto">
+            <p className="text-xs text-zinc-300 leading-relaxed whitespace-pre-wrap">{coverLetter}</p>
+          </div>
+        </div>
+      )}
 
       {/* Notes footer */}
       {app.notes && (

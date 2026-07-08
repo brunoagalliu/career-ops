@@ -6,6 +6,31 @@ import Login from './components/Login.jsx'
 import Settings from './components/Settings.jsx'
 import { authFetch, getToken, clearToken } from './api.js'
 
+function ClearQueueButton() {
+  const [loading, setLoading] = useState(false)
+  async function handleClick() {
+    if (!confirm('Clear all pending URLs from the pipeline queue?')) return
+    setLoading(true)
+    try {
+      const res = await authFetch('/api/pipeline/queue', { method: 'DELETE' })
+      const data = await res.json()
+      if (!res.ok) { alert(data.error || 'Failed'); return }
+      alert(`Cleared ${data.cleared} pending URLs.`)
+    } catch (e) { alert(e.message) }
+    finally { setLoading(false) }
+  }
+  return (
+    <button
+      onClick={handleClick}
+      disabled={loading}
+      title="Clear pending URLs from the pipeline queue"
+      className="flex items-center gap-1 px-2 py-1.5 rounded text-sm font-medium transition-colors text-zinc-500 hover:text-rose-400 hover:bg-rose-500/10 border border-zinc-700/40 hover:border-rose-500/30 disabled:opacity-50"
+    >
+      {loading ? <span className="inline-block w-3 h-3 border border-zinc-400 border-t-transparent rounded-full animate-spin" /> : '⌫'}
+    </button>
+  )
+}
+
 function DownloadCvButton() {
   const [loading, setLoading] = useState(false)
   async function handleClick() {
@@ -139,6 +164,7 @@ export default function App() {
                     ? <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
                     : '▶'} Pipeline
                 </button>
+                <ClearQueueButton />
                 <button
                   onClick={() => setActivePanel('scan')}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium transition-colors text-violet-300 hover:text-violet-200 hover:bg-violet-500/10 border border-violet-500/30 hover:border-violet-400/50"

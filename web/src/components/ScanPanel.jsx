@@ -1,18 +1,30 @@
 import { useState, useEffect, useRef } from 'react'
 import { authFetch, getToken } from '../api.js'
 
-export default function ScanPanel({ mode = 'scan', onClose, onScanComplete }) {
-  const label = mode === 'pipeline' ? 'Pipeline' : 'Portal Scan'
-  const apiBase = `/api/${mode}`
+const FRESHNESS_OPTIONS = [
+  { value: 'day',   label: 'Last 24 hours' },
+  { value: 'week',  label: 'Last 7 days' },
+  { value: 'month', label: 'Last 30 days' },
+  { value: 'any',   label: 'Any time' },
+]
 
-  const [lines, setLines]       = useState([{ type: 'status', text: 'Connecting…' }])
-  const [done, setDone]         = useState(false)
-  const [exitCode, setExit]     = useState(null)
-  const [progress, setProgress] = useState(null) // { current, total } or null
-  const bottomRef               = useRef(null)
-  const esRef                   = useRef(null)
+export default function ScanPanel({ mode = 'scan', onClose, onScanComplete }) {
+  const label    = mode === 'pipeline' ? 'Pipeline' : 'Portal Scan'
+  const apiBase  = `/api/${mode}`
+  const isScan   = mode === 'scan'
+
+  const [freshness, setFreshness] = useState('week')
+  const [started, setStarted]     = useState(!isScan) // pipeline starts immediately
+  const [lines, setLines]         = useState(isScan ? [] : [{ type: 'status', text: 'Connecting…' }])
+  const [done, setDone]           = useState(false)
+  const [exitCode, setExit]       = useState(null)
+  const [progress, setProgress]   = useState(null)
+  const bottomRef                 = useRef(null)
+  const esRef                     = useRef(null)
 
   useEffect(() => {
+    if (!started) return
+
     authFetch(`${apiBase}/status`)
       .then(r => r.json())
       .then(({ available }) => {
@@ -27,7 +39,9 @@ export default function ScanPanel({ mode = 'scan', onClose, onScanComplete }) {
 
     function startStream() {
       const token = getToken()
-      const es = new EventSource(`${apiBase}?token=${token}`)
+      const params = new URLSearchParams({ token })
+      if (isScan) params.set('freshness', freshness)
+      const es = new EventSource(`${apiBase}?${params}`)
       esRef.current = es
 
       es.onmessage = (e) => {
@@ -53,7 +67,7 @@ export default function ScanPanel({ mode = 'scan', onClose, onScanComplete }) {
     }
 
     return () => esRef.current?.close()
-  }, [])
+  }, [started])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -64,6 +78,11 @@ export default function ScanPanel({ mode = 'scan', onClose, onScanComplete }) {
     await authFetch(apiBase, { method: 'DELETE' })
     setLines(prev => [...prev, { type: 'error', text: 'Cancelled.' }])
     setDone(true)
+  }
+
+  function handleStart() {
+    setLines([{ type: 'status', text: 'Connecting…' }])
+    setStarted(true)
   }
 
   const success = done && exitCode === 0
@@ -78,7 +97,7 @@ export default function ScanPanel({ mode = 'scan', onClose, onScanComplete }) {
           <div className="flex items-center gap-2">
             <span className="text-violet-400 text-xs">◆</span>
             <span className="text-sm font-medium">{label}</span>
-            {!done && (
+            {started && !done && (
               <span className="flex items-center gap-1.5 text-xs text-zinc-500">
                 <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                 running
@@ -94,7 +113,7 @@ export default function ScanPanel({ mode = 'scan', onClose, onScanComplete }) {
             )}
           </div>
           <div className="flex items-center gap-2">
-            {!done && (
+            {started && !done && (
               <button
                 onClick={handleStop}
                 className="text-xs text-zinc-500 hover:text-rose-400 transition-colors px-2 py-1 rounded border border-zinc-700 hover:border-rose-500/50"
@@ -125,23 +144,56 @@ export default function ScanPanel({ mode = 'scan', onClose, onScanComplete }) {
         )}
       </div>
 
-      {/* Terminal output */}
-      <div className="flex-1 overflow-y-auto p-4 font-mono text-xs leading-relaxed">
-        {lines.map((line, i) => (
-          <div
-            key={i}
-            className={
-              line.type === 'error'  ? 'text-rose-400' :
-              line.type === 'status' && line.text.startsWith('→') ? 'text-violet-400/80' :
-              line.type === 'status' ? 'text-zinc-500 italic' :
-              'text-zinc-300'
-            }
-          >
-            {line.text}
+      {/* Freshness picker (scan only, before start) */}
+      {isScan && !started && (
+        <div className="flex-1 flex flex-col items-center justify-center gap-6">
+          <div className="text-center">
+            <p className="text-zinc-300 text-sm font-medium mb-1">Search freshness</p>
+            <p className="text-zinc-600 text-xs">Filter results to recently posted jobs only</p>
           </div>
-        ))}
-        <div ref={bottomRef} />
-      </div>
+          <div className="flex flex-col gap-2 w-56">
+            {FRESHNESS_OPTIONS.map(opt => (
+              <button
+                key={opt.value}
+                onClick={() => setFreshness(opt.value)}
+                className={`px-4 py-2.5 rounded-lg text-sm font-medium border transition-colors text-left ${
+                  freshness === opt.value
+                    ? 'bg-violet-600/20 text-violet-300 border-violet-500/50'
+                    : 'bg-zinc-900 text-zinc-400 border-zinc-800 hover:border-zinc-600 hover:text-zinc-200'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={handleStart}
+            className="px-6 py-2 rounded-lg text-sm font-medium bg-violet-600 hover:bg-violet-500 text-white transition-colors"
+          >
+            Start Scan
+          </button>
+        </div>
+      )}
+
+      {/* Terminal output */}
+      {(started || !isScan) && (
+        <div className="flex-1 overflow-y-auto p-4 font-mono text-xs leading-relaxed">
+          {lines.map((line, i) => (
+            <div
+              key={i}
+              className={
+                line.type === 'error'  ? 'text-rose-400' :
+                line.type === 'status' && line.text.startsWith('→') ? 'text-violet-400/80' :
+                line.type === 'status' ? 'text-zinc-500 italic' :
+                'text-zinc-300'
+              }
+            >
+              {line.text}
+            </div>
+          ))}
+          <div ref={bottomRef} />
+        </div>
+      )}
 
     </div>
   )

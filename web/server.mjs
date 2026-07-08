@@ -411,7 +411,7 @@ app.get('/api/debug/claude-test', async (req, res) => {
     { env, cwd: ws, timeout: 60000 },
     (err1, stdout1, stderr1) => {
       // Test 2: execFile stream-json
-      execFile('claude', ['-p', prompt, '--model', 'claude-haiku-4-5-20251001', '--output-format', 'stream-json'],
+      execFile('claude', ['-p', prompt, '--model', 'claude-haiku-4-5-20251001', '--output-format', 'stream-json', '--verbose'],
         { env, cwd: ws, timeout: 60000 },
         (err2, stdout2, stderr2) => {
           res.json({
@@ -463,6 +463,59 @@ app.get('/api/report', requireAuth, async (req, res) => {
     res.status(404).json({ error: 'Report not found' })
   } catch (e) {
     res.status(404).json({ error: 'Report not found' })
+  }
+})
+
+app.post('/api/apply/:reportNum', requireAuth, async (req, res) => {
+  const { reportNum } = req.params
+  if (!/^\d+$/.test(reportNum)) return res.status(400).json({ error: 'Invalid report number' })
+
+  try {
+    const ws = getWorkspace(req.user.id)
+    await syncDbToWorkspace(req.user.id)
+
+    // Find the report file
+    const reportsDir = path.join(ws, 'reports')
+    const reportFile = fs.existsSync(reportsDir)
+      ? fs.readdirSync(reportsDir).find(f => f.startsWith(reportNum.padStart(3, '0') + '-') && f.endsWith('.md'))
+      : null
+    const reportContent = reportFile
+      ? fs.readFileSync(path.join(reportsDir, reportFile), 'utf8')
+      : ''
+
+    const cvContent      = fs.existsSync(path.join(ws, 'cv.md')) ? fs.readFileSync(path.join(ws, 'cv.md'), 'utf8') : ''
+    const profileContent = getProfileYml(req.user)
+
+    const prompt = `You are writing a cover letter for a job application.
+
+## Job Report
+${reportContent || 'No report available.'}
+
+## Candidate CV (summary)
+${cvContent.slice(0, 3000)}
+
+## Candidate Profile
+${profileContent.slice(0, 1500)}
+
+## Task
+Write a professional cover letter for this specific role. Use the job report to tailor it.
+- 3 paragraphs: (1) hook + role match, (2) 2-3 specific proof points from the CV relevant to this role, (3) closing with enthusiasm and call to action
+- Tone: confident, direct, no fluff
+- No "Dear Hiring Manager" — start directly with the hook
+- Do NOT include a subject line or date
+- Length: ~250 words
+- Output ONLY the cover letter text, nothing else`
+
+    execFile('claude', ['-p', prompt, '--model', 'claude-haiku-4-5-20251001'],
+      { env: { ...process.env, ANTHROPIC_API_KEY: req.user.apiKey, HOME: '/app', NO_COLOR: '1' }, timeout: 60000 },
+      (err, stdout, stderr) => {
+        if (err) return res.status(500).json({ error: err.message || 'Generation failed' })
+        const coverLetter = stdout.trim()
+        res.json({ coverLetter })
+      }
+    )
+  } catch (e) {
+    res.status(500).json({ error: e.message })
   }
 })
 
@@ -574,16 +627,12 @@ const activeJobs = new Map()
 
 function pipelineProgressSnapshot(ws) {
   try {
-    const tsvDir = path.join(ws, 'batch', 'tracker-additions')
-    const done = fs.existsSync(tsvDir)
-      ? fs.readdirSync(tsvDir).filter(f => f.endsWith('.tsv') && !f.startsWith('.')).length
-      : 0
     const pipelineMd = path.join(ws, 'data', 'pipeline.md')
-    const total = fs.existsSync(pipelineMd)
-      ? fs.readFileSync(pipelineMd, 'utf8').split('\n')
-          .filter(l => { const t = l.trim(); return t && !t.startsWith('#') }).length
-      : 0
-    return { done, total }
+    if (!fs.existsSync(pipelineMd)) return null
+    const lines = fs.readFileSync(pipelineMd, 'utf8').split('\n')
+    const pending   = lines.filter(l => /^\s*- \[ \]/.test(l)).length
+    const processed = lines.filter(l => /^\s*- \[(?:x|!|X)\]/.test(l)).length
+    return { done: processed, total: pending + processed }
   } catch { return null }
 }
 
@@ -603,7 +652,7 @@ function scanProgressSnapshot(ws) {
   } catch { return null }
 }
 
-function makeJobEndpoints(name, buildPrompt, model = 'claude-sonnet-4-5', snapshotFn = null) {
+function makeJobEndpoints(name, buildPrompt, model = 'claude-sonnet-4-5', snapshotFn = null, afterClose = null) {
   const key = (userId) => `${name}:${userId}`
 
   const statusHandler = (req, res) => {
@@ -662,11 +711,11 @@ function makeJobEndpoints(name, buildPrompt, model = 'claude-sonnet-4-5', snapsh
     try {
       const ws = getWorkspace(req.user.id)
       await syncDbToWorkspace(req.user.id)
-      const prompt = buildPrompt(ws)
+      const prompt = buildPrompt(ws, req)
 
       broadcast('status', `Workspace: ${ws}`)
 
-      const job = spawn('claude', ['-p', prompt, '--dangerously-skip-permissions', '--model', model, '--output-format', 'stream-json'], {
+      const job = spawn('claude', ['-p', prompt, '--dangerously-skip-permissions', '--model', model, '--output-format', 'stream-json', '--verbose'], {
         cwd: ws,
         env: { ...process.env, ANTHROPIC_API_KEY: req.user.apiKey, NO_COLOR: '1', TERM: 'dumb', HOME: '/app' },
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -674,7 +723,7 @@ function makeJobEndpoints(name, buildPrompt, model = 'claude-sonnet-4-5', snapsh
       state.job = job
       broadcast('status', `claude pid ${job.pid ?? 'unknown'}`)
 
-      // claude -p with stream-json: each line is a JSON event (NDJSON)
+      // stream-json + --verbose: NDJSON events on stdout
       let lineBuf = ''
 
       function processJsonLine(raw) {
@@ -698,14 +747,15 @@ function makeJobEndpoints(name, buildPrompt, model = 'claude-sonnet-4-5', snapsh
       job.stdout.on('data', chunk => {
         lineBuf += stripAnsi(chunk.toString())
         const parts = lineBuf.split('\n')
-        lineBuf = parts.pop() || ''           // keep incomplete last line
+        lineBuf = parts.pop() || ''
         for (const line of parts) processJsonLine(line)
       })
-
-      // flush anything left in the buffer when stdout closes
       job.stdout.on('end', () => { if (lineBuf.trim()) { processJsonLine(lineBuf); lineBuf = '' } })
-
-      job.stderr.on('data', chunk => { const t = stripAnsi(chunk.toString()); if (t.trim()) broadcast('error', t) })
+      job.stderr.on('data', chunk => {
+        const t = stripAnsi(chunk.toString())
+        // suppress the stdin warning — it's harmless with -p argument mode
+        if (t.trim() && !t.includes('no stdin data received')) broadcast('error', t)
+      })
 
       // progress polling
       let progressTimer = null
@@ -725,6 +775,9 @@ function makeJobEndpoints(name, buildPrompt, model = 'claude-sonnet-4-5', snapsh
       job.on('close', async (code) => {
         if (progressTimer) clearInterval(progressTimer)
         broadcast('status', `claude exited with code ${code}`)
+        if (afterClose) {
+          try { await afterClose(ws, broadcast) } catch (e) { broadcast('error', `post-job: ${e.message}`) }
+        }
         try { await syncWorkspaceToDb(req.user.id) } catch {}
         state.done = true; state.exitCode = code ?? 0
         broadcast('done', String(state.exitCode))
@@ -758,37 +811,102 @@ function makeJobEndpoints(name, buildPrompt, model = 'claude-sonnet-4-5', snapsh
   return { statusHandler, startHandler, stopHandler }
 }
 
-// ── Scan ──────────────────────────────────────────────────────────────────────
+// ── Candidate profile (per-user, read from workspace after DB sync) ──────────
 
-function buildScanPrompt(ws) {
-  const read  = (rel) => { try { return fs.readFileSync(path.join(ROOT, rel), 'utf8') } catch { return '' } }
-  const readW = (rel) => { try { return fs.readFileSync(path.join(ws, rel), 'utf8') }   catch { return '' } }
-  const today = new Date().toISOString().split('T')[0]
-  return [
-    `Today's date: ${today}`,
-    `Working directory: ${ws}`,
-    '', '## CRITICAL — Non-interactive pipe mode',
-    'This is an automated run with NO user present. You MUST:',
-    '- Execute ALL file writes immediately without asking for confirmation.',
-    '- Write to data/pipeline.md and data/scan-history.tsv as you go.',
-    '- NEVER say "Shall I update...?" or "Do you want me to...?" — just do it.',
-    '- Print a short status line before each major action so the user sees live progress, e.g.:',
-    '  "→ Fetching: boards-api.greenhouse.io/v1/boards/hubspot/jobs"',
-    '  "→ Searching: site:jobs.ashbyhq.com paid media remote"',
-    '  "→ Writing 5 new offers to pipeline.md"',
-    '',
-    '## Instructions',
-    'You are running career-ops scan in pipe mode (no Playwright available).',
-    'Read the files below, then execute the full scan workflow.',
-    'Use WebSearch and WebFetch for discovery. Skip Playwright-only steps gracefully.',
-    'Greenhouse API endpoints (boards-api.greenhouse.io/v1/boards/{slug}/jobs) return JSON — use WebFetch on them for tracked companies that have an api: field.',
-    '', '---', read('modes/_shared.md'),
-    '---', readW('modes/_profile.md'),
-    '---', read('modes/scan.md'),
-  ].join('\n')
+function loadProfile(ws) {
+  try { return yaml.load(fs.readFileSync(path.join(ws, 'config', 'profile.yml'), 'utf8')) || {} }
+  catch { return {} }
 }
 
-const scan = makeJobEndpoints('scan', buildScanPrompt, 'claude-haiku-4-5-20251001', scanProgressSnapshot)
+function loadProfileNotes(ws) {
+  try {
+    const raw = fs.readFileSync(path.join(ws, 'modes', '_profile.md'), 'utf8')
+    // skip if it's still the untouched template
+    if (/\{\{|<!--\s*template/i.test(raw)) return ''
+    return raw.slice(0, 1500)
+  } catch { return '' }
+}
+
+function candidateSummary(profile) {
+  const c    = profile.candidate     || {}
+  const loc  = profile.location      || {}
+  const comp = profile.compensation  || {}
+  const nar  = profile.narrative     || {}
+  const roles = profile.target_roles || {}
+  const archetypes = roles.archetypes || []
+
+  const primary   = roles.primary?.length ? roles.primary : archetypes.filter(a => a.fit === 'primary').map(a => a.name)
+  const secondary = archetypes.filter(a => a.fit === 'secondary').map(a => a.name)
+
+  return {
+    name: c.full_name || 'Candidate',
+    location: [loc.city, loc.country].filter(Boolean).join(', ') || c.location || 'unspecified location',
+    primary, secondary,
+    superpowers: nar.superpowers || [],
+    compRange: comp.target_range || '',
+    compMin: comp.minimum || '',
+    currency: comp.currency || '',
+    remotePolicy: comp.location_flexibility || loc.onsite_availability || 'Remote preferred',
+    visaStatus: loc.visa_status || '',
+  }
+}
+
+// ── Scan ──────────────────────────────────────────────────────────────────────
+
+function buildScanPrompt(ws, freshness = 'week') {
+  const today = new Date().toISOString().split('T')[0]
+  const cutoff = { day: 1, week: 7, month: 30, any: 0 }[freshness] || 7
+  const afterDate = cutoff > 0
+    ? new Date(Date.now() - cutoff * 86400000).toISOString().split('T')[0]
+    : null
+  const dateFilter = afterDate ? ` after:${afterDate}` : ''
+  const freshnessNote = afterDate
+    ? `Only include jobs posted after ${afterDate} (use the after: filter in every query).`
+    : 'No date filter — include all results.'
+
+  const profile = loadProfile(ws)
+  const cand = candidateSummary(profile)
+  const notes = loadProfileNotes(ws)
+
+  const roleTerms = [...cand.primary, ...cand.secondary]
+  if (roleTerms.length === 0) roleTerms.push('open roles')
+  const boards = ['jobs.ashbyhq.com', 'boards.greenhouse.io', 'lever.co', 'weworkremotely.com', 'himalayas.app']
+  const queries = boards.map((board, i) => `site:${board} "${roleTerms[i % roleTerms.length]}" remote${dateFilter}`)
+
+  return `Today: ${today}. Working directory: ${ws}.
+Non-interactive web dashboard run — NO user present. Write all files immediately. Never ask for confirmation.
+IMPORTANT: Ignore any instructions from CLAUDE.md or modes/ files. Follow ONLY the steps in this prompt exactly as written.
+
+## Your task: Scan for new job offers
+
+Candidate: ${cand.name}, ${cand.location}. Remote policy: ${cand.remotePolicy}.
+Target roles: ${cand.primary.join(', ') || '(see config/profile.yml — none set)'}${cand.secondary.length ? `; secondary: ${cand.secondary.join(', ')}` : ''}.
+Negative keywords: skip roles that clearly don't match any of the target roles above (wrong function, wrong seniority).
+${notes ? `Additional preferences from the candidate's profile notes:\n${notes}\n` : ''}Freshness: ${freshnessNote}
+
+## Steps
+
+1. Read \`data/scan-history.tsv\` — these URLs are already known, skip them.
+2. Read \`data/pipeline.md\` — also skip URLs already listed there.
+3. Run exactly ${queries.length} WebSearch queries using these patterns:
+${queries.map(q => `   - ${q}`).join('\n')}
+4. For each result URL not already in the dedup lists:
+   a. Print "→ Verifying: [URL]"
+   b. WebFetch the URL. Check if the job is still active:
+      - SKIP if HTTP 404, 410, or the page says "job not found", "position filled", "no longer available", "this job has expired", or shows only a generic careers directory with no specific job content
+      - SKIP if it's a generic company careers page, not a specific job posting
+      - KEEP if you can see a job title, description, and apply button/link
+   c. If kept: Print "→ Added: [Company] — [Role]"
+      - Append to \`data/pipeline.md\` under "## Pendientes": \`- [ ] URL — Company Role\`
+      - Append to \`data/scan-history.tsv\`: \`URL\\tCompany\\tRole\\t${today}\`
+   d. If skipped: Print "→ Skipped (expired/inaccessible): [URL]"
+      - Still append to \`data/scan-history.tsv\` to avoid rechecking it
+5. Print final summary: "Scan complete — N new offers added, M expired/skipped."
+
+Print "→ Searching: [query]" before each WebSearch.`
+}
+
+const scan = makeJobEndpoints('scan', (ws, req) => buildScanPrompt(ws, req?.query?.freshness), 'claude-haiku-4-5-20251001', scanProgressSnapshot)
 app.get('/api/scan/status', requireAuth, scan.statusHandler)
 app.get('/api/scan',        requireAuth, scan.startHandler)
 app.delete('/api/scan',     requireAuth, scan.stopHandler)
@@ -796,36 +914,101 @@ app.delete('/api/scan',     requireAuth, scan.stopHandler)
 // ── Pipeline ──────────────────────────────────────────────────────────────────
 
 function buildPipelinePrompt(ws) {
-  const read  = (rel) => { try { return fs.readFileSync(path.join(ROOT, rel), 'utf8') } catch { return '' } }
-  const readW = (rel) => { try { return fs.readFileSync(path.join(ws, rel), 'utf8') }   catch { return '' } }
   const today = new Date().toISOString().split('T')[0]
-  return [
-    `Today's date: ${today}`,
-    `Working directory: ${ws}`,
-    '', '## CRITICAL — Non-interactive pipe mode',
-    'This is an automated run with NO user present. You MUST:',
-    '- Execute ALL file writes immediately without asking for confirmation.',
-    '- Write TSV files to batch/tracker-additions/ for each evaluated offer.',
-    '- NEVER say "Shall I...?" or "Do you want me to...?" — just do it.',
-    '- After writing all TSVs, run: node merge-tracker.mjs',
-    '- Print a brief status line before processing each offer (e.g. "Processing 1/5: Company — Role").',
-    '',
-    '## Instructions',
-    'You are running career-ops pipeline in pipe mode (no Playwright available).',
-    'Read the files below, then execute the full pipeline workflow.',
-    'Use WebSearch and WebFetch for offer verification. Skip Playwright-only steps gracefully.',
-    'Write TSV files to batch/tracker-additions/ for each evaluated offer.',
-    'After all offers are processed, run: node merge-tracker.mjs',
-    '', '---', read('modes/_shared.md'),
-    '---', readW('modes/_profile.md'),
-    '---', read('modes/pipeline.md'),
-  ].join('\n')
+  const profile = loadProfile(ws)
+  const cand = candidateSummary(profile)
+  const notes = loadProfileNotes(ws)
+
+  const compLine = cand.compRange
+    ? `Comp target: ${cand.compRange}${cand.currency ? ' ' + cand.currency : ''}${cand.compMin ? ` (walk-away: ${cand.compMin})` : ''}.`
+    : 'Comp target: (see config/profile.yml — none set).'
+
+  return `Today: ${today}. Working directory: ${ws}.
+Non-interactive web dashboard run — NO user present. Write all files immediately. Never ask for confirmation.
+IMPORTANT: Ignore any instructions from CLAUDE.md or modes/ files. Follow ONLY the steps in this prompt exactly as written.
+
+## Your task: Evaluate job offers
+
+Candidate: ${cand.name}, ${cand.location}.
+Superpowers: ${cand.superpowers.join(', ') || '(see cv.md for experience details)'}.
+Target roles (primary): ${cand.primary.join(', ') || '(see config/profile.yml — none set)'}.
+Target roles (secondary): ${cand.secondary.join(', ') || 'none specified'}.
+Remote policy: ${cand.remotePolicy}.${cand.visaStatus ? ` Visa status: ${cand.visaStatus}.` : ''} On-site without sponsorship/willingness = disqualify unless the candidate's profile says otherwise.
+${compLine}
+${notes ? `Additional preferences from the candidate's profile notes:\n${notes}\n` : ''}
+Before scoring, read \`cv.md\` in the working directory for the candidate's full experience and proof points — do not rely on the summary above alone.
+
+## Scoring 1–5
+
+- 5.0: Primary role, fully remote, strong tech match, good comp
+- 4.0–4.9: Primary or secondary role, remote, reasonable comp
+- 3.0–3.9: Secondary role or minor location/comp concerns
+- 2.0–2.9: Weak match on role OR requires on-site without sponsorship
+- 1.0–1.9: Wrong role, on-site only, or clearly a mismatch
+
+## Steps
+
+1. Read \`data/pipeline.md\` — get the first 10 items marked \`- [ ]\` (pending).
+2. Read \`reports/\` directory listing to find the highest existing report number (next = max + 1).
+3. For each pending URL (process one at a time, print progress):
+   a. Print "→ Processing N/10: URL"
+   b. Fetch the job description using this priority order:
+      1. Playwright: browser_navigate to the URL, then browser_snapshot to read rendered content (handles JS-heavy boards like Greenhouse, Lever, Ashby)
+      2. WebFetch: fallback if Playwright fails or returns empty content
+      3. WebSearch: last resort — search "[company] [role] site:jobs.example.com" to find cached content
+      If all methods fail or return a 404/login-wall, mark as inaccessible.
+   c. Score it 1–5 against the candidate profile above. Write a concise evaluation.
+   d. Write report to \`reports/{NNN}-{company-slug}-${today}.md\`:
+      \`\`\`
+      # {Role} — {Company}
+      **Score:** {X.X}/5
+      **URL:** {url}
+      **PDF:** ❌
+      **Date:** ${today}
+
+      ## Fit Summary
+      {2-3 sentences: role match, remote policy, comp estimate, key signals}
+
+      ## Recommendation
+      {Apply / Skip / Watch} — {one sentence reason}
+      \`\`\`
+   e. Write TSV to \`batch/tracker-additions/{NNN}-{company-slug}.tsv\` (single line, tab-separated):
+      {NNN}\\t${today}\\t{Company}\\t{Role}\\tEvaluated\\t{X.X}/5\\t❌\\t[{NNN}](reports/{NNN}-{slug}-${today}.md)\\t{one-line note}
+   f. In \`data/pipeline.md\`, change \`- [ ] URL\` to \`- [x] #{NNN} | URL | Company | Role | {X.X}/5 | PDF ❌\`
+4. Print summary table: | # | Company | Role | Score | Recommendation |
+
+Print "→ Processing N/10: Company — Role (X.X/5)" after scoring each offer.`
 }
 
-const pipeline = makeJobEndpoints('pipeline', buildPipelinePrompt, 'claude-haiku-4-5-20251001', pipelineProgressSnapshot)
+async function runMergeTracker(ws, broadcast) {
+  broadcast('status', 'Merging tracker additions…')
+  await new Promise((resolve, reject) => {
+    execFile('node', [path.join(ROOT, 'merge-tracker.mjs'), `--root=${ws}`], { cwd: ws, timeout: 30000 }, (err, stdout, stderr) => {
+      if (stdout?.trim()) broadcast('status', stdout.trim().split('\n').pop())
+      if (err) { broadcast('error', `merge-tracker: ${err.message}`); reject(err) } else resolve()
+    })
+  })
+}
+
+const pipeline = makeJobEndpoints('pipeline', buildPipelinePrompt, 'claude-haiku-4-5-20251001', pipelineProgressSnapshot, runMergeTracker)
 app.get('/api/pipeline/status', requireAuth, pipeline.statusHandler)
 app.get('/api/pipeline',        requireAuth, pipeline.startHandler)
 app.delete('/api/pipeline',     requireAuth, pipeline.stopHandler)
+
+app.delete('/api/pipeline/queue', requireAuth, async (req, res) => {
+  try {
+    const ws  = getWorkspace(req.user.id)
+    await syncDbToWorkspace(req.user.id)
+    const file = path.join(ws, 'data', 'pipeline.md')
+    if (!fs.existsSync(file)) return res.json({ cleared: 0 })
+    const lines   = fs.readFileSync(file, 'utf8').split('\n')
+    const pending = lines.filter(l => /^\s*- \[ \]/.test(l)).length
+    const kept    = lines.filter(l => !/^\s*- \[ \]/.test(l)).join('\n')
+    fs.writeFileSync(file, kept, 'utf8')
+    await saveFile(req.user.id, 'data/pipeline.md', kept)
+    res.json({ cleared: pending })
+  } catch (e) { res.status(500).json({ error: e.message }) }
+})
 
 // ── CV PDF generation (no tokens) ─────────────────────────────────────────────
 
