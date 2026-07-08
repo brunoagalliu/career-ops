@@ -2,6 +2,12 @@ FROM node:22-bookworm-slim
 
 WORKDIR /app
 
+# procps provides `ps`, which tree-kill needs on Linux to walk a process tree
+# (used to stop scan/pipeline jobs). Without it, spawn('ps', ...) throws
+# ENOENT as an unhandled error event and crashes the whole Node process.
+RUN apt-get update && apt-get install -y --no-install-recommends procps && \
+    rm -rf /var/lib/apt/lists/*
+
 # Copy everything
 COPY . .
 
