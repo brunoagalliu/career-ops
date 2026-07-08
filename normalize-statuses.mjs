@@ -11,9 +11,10 @@
  * Run: node career-ops/normalize-statuses.mjs [--dry-run]
  */
 
-import { readFileSync, writeFileSync, copyFileSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, copyFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { rebuildRow } from './tracker-utils.mjs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
 // Support both layouts: data/applications.md (boilerplate) and applications.md (original)
@@ -21,6 +22,9 @@ const APPS_FILE = existsSync(join(CAREER_OPS, 'data/applications.md'))
   ? join(CAREER_OPS, 'data/applications.md')
   : join(CAREER_OPS, 'applications.md');
 const DRY_RUN = process.argv.includes('--dry-run');
+
+// Ensure required directories exist (fresh setup)
+mkdirSync(join(CAREER_OPS, 'data'), { recursive: true });
 
 // Canonical status mapping
 function normalizeStatus(raw) {
@@ -64,7 +68,7 @@ function normalizeStatus(raw) {
   // Already canonical (English, per states.yml) — just fix casing/bold
   const canonical = [
     'Evaluated', 'Applied', 'Responded', 'Interview',
-    'Offer', 'Rejected', 'Discarded', 'SKIP',
+    'Offer', 'Hired', 'Rejected', 'Discarded', 'SKIP',
   ];
   for (const c of canonical) {
     if (lower === c.toLowerCase()) return { status: c };
@@ -76,6 +80,7 @@ function normalizeStatus(raw) {
   if (['respondido'].includes(lower)) return { status: 'Responded' };
   if (['entrevista'].includes(lower)) return { status: 'Interview' };
   if (['oferta'].includes(lower)) return { status: 'Offer' };
+  if (['contratado', 'contratada', 'hired', 'accepted', 'accept'].includes(lower)) return { status: 'Hired' };
   if (['cerrada', 'descartada'].includes(lower)) return { status: 'Discarded' };
   if (['no aplicar', 'no_aplicar', 'skip'].includes(lower)) return { status: 'SKIP' };
 
@@ -136,7 +141,7 @@ for (let i = 0; i < lines.length; i++) {
   }
 
   // Reconstruct line
-  const newLine = '| ' + parts.slice(1, -1).join(' | ') + ' |';
+  const newLine = rebuildRow(parts);
   lines[i] = newLine;
   changes++;
 
