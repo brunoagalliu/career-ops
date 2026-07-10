@@ -88,6 +88,29 @@ async function getAllFiles(userId) {
   return r.rows
 }
 
+async function deleteFile(userId, filePath) {
+  await pool.query('DELETE FROM user_files WHERE user_id = $1 AND path = $2', [userId, filePath])
+}
+
+async function listFilesByPrefix(userId, prefix) {
+  const r = await pool.query('SELECT path FROM user_files WHERE user_id = $1 AND path LIKE $2', [userId, `${prefix}%`])
+  return r.rows.map(row => row.path)
+}
+
+// Recursively list .tsv files under `dir`, returning DB-style forward-slash
+// paths relative to the workspace root (relBase is the path's own prefix).
+function walkTsvFiles(dir, relBase) {
+  const out = []
+  if (!fs.existsSync(dir)) return out
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name)
+    const rel  = `${relBase}/${entry.name}`
+    if (entry.isDirectory()) { out.push(...walkTsvFiles(full, rel)); continue }
+    if (entry.name.endsWith('.tsv')) out.push({ rel, full })
+  }
+  return out
+}
+
 // map snake_case DB row → camelCase object used throughout the server
 function toUser(row) {
   if (!row) return null
@@ -201,14 +224,31 @@ async function syncWorkspaceToDb(userId) {
   for (const rel of TRACKED) {
     try { await saveFile(userId, rel, fs.readFileSync(path.join(ws, rel), 'utf8')) } catch {}
   }
-  for (const dir of ['reports', path.join('batch', 'tracker-additions'), 'interview-prep']) {
+  for (const dir of ['reports', 'interview-prep']) {
     const full = path.join(ws, dir)
     if (!fs.existsSync(full)) continue
     for (const f of fs.readdirSync(full)) {
-      if (f.endsWith('.md') || f.endsWith('.tsv')) {
+      if (f.endsWith('.md')) {
         try { await saveFile(userId, `${dir}/${f}`, fs.readFileSync(path.join(full, f), 'utf8')) } catch {}
       }
     }
+  }
+
+  // batch/tracker-additions: mirror on-disk state exactly (recursing into
+  // merged/) instead of only ever upserting. merge-tracker.mjs moves
+  // successfully-merged TSVs into merged/ on disk; without deleting the
+  // stale un-merged DB row, the next job's syncDbToWorkspace would
+  // resurrect the old copy and merge-tracker would re-skip it forever.
+  const additionsRoot = 'batch/tracker-additions'
+  const onDisk = walkTsvFiles(path.join(ws, additionsRoot), additionsRoot)
+  const onDiskPaths = new Set()
+  for (const { rel, full } of onDisk) {
+    onDiskPaths.add(rel)
+    try { await saveFile(userId, rel, fs.readFileSync(full, 'utf8')) } catch {}
+  }
+  const dbPaths = await listFilesByPrefix(userId, `${additionsRoot}/`)
+  for (const p of dbPaths) {
+    if (!onDiskPaths.has(p)) await deleteFile(userId, p)
   }
 }
 
@@ -453,10 +493,16 @@ app.get('/api/metrics', requireAuth, async (req, res) => {
 })
 
 app.get('/api/report', requireAuth, async (req, res) => {
-  const reportPath = req.query.path
-  if (!reportPath || !/^reports\/[\w.-]+\.md$/.test(reportPath)) {
+  // Tracker links are written relative to data/applications.md's own
+  // location, so a valid link is often `../reports/xxx.md`, not just
+  // `reports/xxx.md`. Extract the filename regardless of leading `../`
+  // and reconstruct the canonical `reports/<file>.md` key used in storage.
+  const raw = req.query.path || ''
+  const match = raw.match(/reports\/([\w.-]+\.md)$/)
+  if (!match) {
     return res.status(403).json({ error: 'Invalid path' })
   }
+  const reportPath = `reports/${match[1]}`
   try {
     const content = await getFile(req.user.id, reportPath)
     if (content !== null) return res.json({ content })
