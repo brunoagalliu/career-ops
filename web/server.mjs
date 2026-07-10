@@ -702,7 +702,7 @@ function scanProgressSnapshot(ws) {
   } catch { return null }
 }
 
-function makeJobEndpoints(name, buildPrompt, model = 'claude-sonnet-4-5', snapshotFn = null, afterClose = null) {
+function makeJobEndpoints(name, buildPrompt, model = 'claude-sonnet-4-5', snapshotFn = null, afterClose = null, beforeStart = null) {
   const key = (userId) => `${name}:${userId}`
 
   const statusHandler = (req, res) => {
@@ -761,6 +761,9 @@ function makeJobEndpoints(name, buildPrompt, model = 'claude-sonnet-4-5', snapsh
     try {
       const ws = getWorkspace(req.user.id)
       await syncDbToWorkspace(req.user.id)
+      if (beforeStart) {
+        try { await beforeStart(ws, broadcast, req) } catch (e) { broadcast('error', `pre-job: ${e.message}`) }
+      }
       const prompt = buildPrompt(ws, req)
 
       broadcast('status', `Workspace: ${ws}`)
@@ -988,6 +991,152 @@ async function verifyLinkedInQueue(ws, broadcast, req) {
   fs.writeFileSync(pipelinePath, lines.join('\n'), 'utf8')
 }
 
+// Turns a portals.yml search-engine-style query (e.g. `site:linkedin.com/jobs
+// "ad operations manager" OR "ad ops" OR martech remote`) into plain keyword
+// phrases LinkedIn's own search box accepts — LinkedIn doesn't parse `site:`/
+// boolean OR the way Google does, so each phrase is searched separately.
+function extractLinkedInKeywordPhrases(query) {
+  const cleaned = query
+    .replace(/site:\S+/gi, '')
+    .replace(/\bremote\b/gi, '')
+    .replace(/\bafter:\S+/gi, '')
+    .trim()
+  const parts = cleaned.split(/\s+OR\s+/i).map(p => p.trim().replace(/^"|"$/g, '')).filter(Boolean)
+  return parts.length > 0 ? parts : [cleaned]
+}
+
+function linkedInJobId(url) {
+  const m = url.match(/\/jobs\/view\/\D*(\d{6,})/)
+  return m ? m[1] : null
+}
+
+const LINKEDIN_WORLDWIDE_GEO_ID     = '92000000' // LinkedIn's own "Worldwide" location code
+const MAX_LINKEDIN_SEARCH_PHRASES   = 8
+const MAX_LINKEDIN_CANDIDATES       = 40 // keeps the prompt (and the LLM's relevance review) bounded
+const LINKEDIN_CANDIDATES_PATH      = ['data', '.linkedin-candidates.tsv']
+
+// Runs as the scan job's beforeStart hook: replaces WebSearch for LinkedIn.
+// WebSearch's `site:linkedin.com after:DATE` results are unreliable for
+// freshness (LinkedIn doesn't expose crawlable post-date metadata to search
+// engines), so this navigates directly to LinkedIn's own job-search results —
+// sorted by date, real f_TPR freshness filter, real per-listing ISO
+// `datetime` — via the same headless-browser infrastructure already used for
+// liveness verification. Deterministic server-side code, not an LLM tool
+// call. LinkedIn's own keyword matching is loose (a search for "ad operations
+// manager" also returns "Fund Operations Manager", "Customer Success
+// Manager", etc.), so this only *discovers and stages* candidates — it does
+// NOT write them to the pipeline queue directly. buildScanPrompt reads the
+// staging file and has the LLM do the relevance call against target roles,
+// same as it already does for every other source.
+async function fetchLinkedInCandidates(ws, broadcast, req) {
+  const freshnessDays = freshnessToDays(req?.query?.freshness)
+  const portals = loadPortals(ws)
+  const linkedinQueries = (portals.search_queries || []).filter(q => q.enabled && q.query && q.query.includes('linkedin.com'))
+  if (linkedinQueries.length === 0) return
+
+  const stagingPath = path.join(ws, ...LINKEDIN_CANDIDATES_PATH)
+  try { fs.unlinkSync(stagingPath) } catch {}
+
+  const historyPath  = path.join(ws, 'data', 'scan-history.tsv')
+  const pipelinePath = path.join(ws, 'data', 'pipeline.md')
+  const historyText  = fs.existsSync(historyPath) ? fs.readFileSync(historyPath, 'utf8') : ''
+  const pipelineText = fs.existsSync(pipelinePath) ? fs.readFileSync(pipelinePath, 'utf8') : ''
+
+  const knownIds = new Set()
+  for (const text of [historyText, pipelineText]) {
+    for (const m of text.matchAll(/jobs\/view\/\D*(\d{6,})/g)) knownIds.add(m[1])
+  }
+
+  const phrases = linkedinQueries.flatMap(q => extractLinkedInKeywordPhrases(q.query)).slice(0, MAX_LINKEDIN_SEARCH_PHRASES)
+  if (phrases.length === 0) return
+
+  const cutoffDate = freshnessDays > 0 ? new Date(Date.now() - freshnessDays * 86400000) : null
+
+  broadcast('status', `Searching LinkedIn directly (bypassing WebSearch) for ${phrases.length} quer${phrases.length === 1 ? 'y' : 'ies'}…`)
+
+  let browser
+  try {
+    browser = await chromium.launch({ headless: true })
+  } catch (e) {
+    broadcast('error', `LinkedIn search: browser launch failed: ${e.message}`)
+    return
+  }
+
+  const candidates = []
+
+  try {
+    for (const phrase of phrases) {
+      const params = new URLSearchParams({
+        keywords: phrase,
+        geoId: LINKEDIN_WORLDWIDE_GEO_ID,
+        f_WT: '2', // Remote
+        sortBy: 'DD',
+      })
+      if (freshnessDays > 0) params.set('f_TPR', `r${freshnessDays * 86400}`)
+      const url = `https://www.linkedin.com/jobs/search/?${params}`
+
+      broadcast('status', `→ Searching LinkedIn: "${phrase}"`)
+      try {
+        const page = await newLivenessPage(browser)
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 })
+        await page.waitForTimeout(2500)
+        const cards = await page.evaluate(() => {
+          return Array.from(document.querySelectorAll('li')).map(li => {
+            const link = li.querySelector('a[href*="/jobs/view/"]')
+            if (!link) return null
+            return {
+              href: link.href,
+              title: li.querySelector('[class*="title"]')?.textContent?.replace(/\s+/g, ' ').trim() || '',
+              company: li.querySelector('[class*="subtitle"]')?.textContent?.replace(/\s+/g, ' ').trim() || '',
+              datetime: li.querySelector('time')?.getAttribute('datetime') || null,
+            }
+          }).filter(Boolean)
+        })
+        await page.close().catch(() => {})
+
+        for (const card of cards) {
+          const id = linkedInJobId(card.href)
+          if (!id || knownIds.has(id)) continue
+          knownIds.add(id)
+          if (cutoffDate && card.datetime && new Date(card.datetime) < cutoffDate) continue
+          candidates.push({
+            url: `https://www.linkedin.com/jobs/view/${id}`,
+            company: card.company || 'Unknown',
+            title: card.title || 'Unknown role',
+            datetime: card.datetime || '',
+          })
+        }
+      } catch (e) {
+        broadcast('error', `LinkedIn search failed for "${phrase}": ${e.message}`)
+      }
+      await sleep(jitteredDelayMs(1500))
+    }
+  } finally {
+    await browser.close().catch(() => {})
+  }
+
+  // Most recent first, capped — keeps the prompt (and the LLM's relevance
+  // review pass) bounded even when a broad phrase returns many matches.
+  candidates.sort((a, b) => (b.datetime || '').localeCompare(a.datetime || ''))
+  const kept = candidates.slice(0, MAX_LINKEDIN_CANDIDATES)
+
+  if (kept.length > 0) {
+    fs.mkdirSync(path.dirname(stagingPath), { recursive: true })
+    fs.writeFileSync(stagingPath, kept.map(c => `${c.url}\t${c.company}\t${c.title}\t${c.datetime}`).join('\n') + '\n', 'utf8')
+  }
+
+  broadcast('status', `LinkedIn search complete — ${kept.length} candidate(s) staged for relevance review (${candidates.length} found before capping).`)
+}
+
+// Combined afterClose hook for the scan job: clears the LinkedIn candidate
+// staging file (whether or not the LLM consumed it), then runs the liveness/
+// freshness safety net over whatever's now pending — this also covers
+// LinkedIn URLs that predate this feature or were pasted in manually.
+async function scanAfterClose(ws, broadcast, req) {
+  try { fs.unlinkSync(path.join(ws, ...LINKEDIN_CANDIDATES_PATH)) } catch {}
+  await verifyLinkedInQueue(ws, broadcast, req)
+}
+
 // ── Scan ──────────────────────────────────────────────────────────────────────
 
 function buildScanPrompt(ws, freshness = 'week') {
@@ -1007,15 +1156,17 @@ function buildScanPrompt(ws, freshness = 'week') {
 
   // Prefer the user's own portals.yml search_queries (configured + enabled in
   // the Portals screen) over auto-generating queries — otherwise disabling a
-  // query there has no effect on what the scan actually searches.
+  // query there has no effect on what the scan actually searches. LinkedIn
+  // queries are excluded here on purpose — they're handled separately by
+  // fetchLinkedInCandidates, a real headless-browser search against LinkedIn's
+  // own results, since WebFetch can't see LinkedIn's JS-rendered freshness signal.
   const MAX_QUERIES = 10
-  const enabledQueries = (loadPortals(ws).search_queries || [])
-    .filter(q => q.enabled && q.query)
-    .slice(0, MAX_QUERIES)
+  const allEnabled = (loadPortals(ws).search_queries || []).filter(q => q.enabled && q.query)
+  const nonLinkedInEnabled = allEnabled.filter(q => !q.query.includes('linkedin.com')).slice(0, MAX_QUERIES)
 
   let queries
-  if (enabledQueries.length > 0) {
-    queries = enabledQueries.map(q => `${q.query}${dateFilter}`)
+  if (allEnabled.length > 0) {
+    queries = nonLinkedInEnabled.map(q => `${q.query}${dateFilter}`)
   } else {
     const roleTerms = [...cand.primary, ...cand.secondary]
     if (roleTerms.length === 0) roleTerms.push('open roles')
@@ -1023,22 +1174,7 @@ function buildScanPrompt(ws, freshness = 'week') {
     queries = boards.map((board, i) => `site:${board} "${roleTerms[i % roleTerms.length]}" remote${dateFilter}`)
   }
 
-  return `Today: ${today}. Working directory: ${ws}.
-Non-interactive web dashboard run — NO user present. Write all files immediately. Never ask for confirmation.
-IMPORTANT: Ignore any instructions from CLAUDE.md or modes/ files. Follow ONLY the steps in this prompt exactly as written.
-
-## Your task: Scan for new job offers
-
-Candidate: ${cand.name}, ${cand.location}. Remote policy: ${cand.remotePolicy}.
-Target roles: ${cand.primary.join(', ') || '(see config/profile.yml — none set)'}${cand.secondary.length ? `; secondary: ${cand.secondary.join(', ')}` : ''}.
-Negative keywords: skip roles that clearly don't match any of the target roles above (wrong function, wrong seniority).
-${notes ? `Additional preferences from the candidate's profile notes:\n${notes}\n` : ''}Freshness: ${freshnessNote}
-
-## Steps
-
-1. Read \`data/scan-history.tsv\` — these URLs are already known, skip them.
-2. Read \`data/pipeline.md\` — also skip URLs already listed there.
-3. Run exactly ${queries.length} WebSearch queries using these patterns:
+  const searchStep = queries.length > 0 ? `3. Run exactly ${queries.length} WebSearch queries using these patterns:
 ${queries.map(q => `   - ${q}`).join('\n')}
 4. For each result URL not already in the dedup lists:
    a. Print "→ Verifying: [URL]"
@@ -1053,10 +1189,57 @@ ${queries.map(q => `   - ${q}`).join('\n')}
       - Still append to \`data/scan-history.tsv\` to avoid rechecking it
 5. Print final summary: "Scan complete — N new offers added, M expired/skipped."
 
-Print "→ Searching: [query]" before each WebSearch.`
+Print "→ Searching: [query]" before each WebSearch.` : `3. No non-LinkedIn search queries are configured/enabled for this step — LinkedIn is handled separately by a direct browser search. Print "No additional search queries configured — LinkedIn is handled separately." and stop here. Do not search linkedin.com yourself.`
+
+  // Candidates staged by fetchLinkedInCandidates (this job's beforeStart hook):
+  // already discovered via a real headless browser and freshness/liveness-
+  // checked, so the LLM's only remaining job for these is a relevance call —
+  // LinkedIn's own keyword matching is loose enough that raw results include
+  // plenty of same-word-different-meaning noise (e.g. "ad operations manager"
+  // also surfaces "Fund Operations Manager").
+  let linkedinSection = ''
+  const stagingPath = path.join(ws, ...LINKEDIN_CANDIDATES_PATH)
+  if (fs.existsSync(stagingPath)) {
+    const candidateLines = fs.readFileSync(stagingPath, 'utf8').trim().split('\n').filter(Boolean)
+    if (candidateLines.length > 0) {
+      linkedinSection = `
+
+## LinkedIn candidates (already verified live + fresh — relevance judgment only)
+
+${candidateLines.length} candidate(s) were found via a direct LinkedIn search and already passed a freshness/liveness check by a real browser — do NOT WebFetch, WebSearch, or re-verify these. LinkedIn's own keyword matching is loose, so many will NOT actually fit the target roles despite the keyword overlap (e.g. a search for "ad operations manager" also surfaces "Fund Operations Manager" or "Customer Success Manager"). Your only job here is relevance:
+
+Format per line: URL\\tCompany\\tTitle\\tPostedDate
+
+${candidateLines.join('\n')}
+
+For each candidate that is a genuine match for the target roles above (same bar as any other result — reject generic/unrelated titles despite the keyword match):
+- Print "→ LinkedIn match: [Company] — [Title]"
+- Append to \`data/pipeline.md\` under "## Pendientes": \`- [ ] URL — Company Title\`
+- Append to \`data/scan-history.tsv\`: \`URL\\tCompany\\tTitle\\t${today}\`
+Reject the rest silently — no need to print anything for rejected candidates.`
+    }
+  }
+
+  return `Today: ${today}. Working directory: ${ws}.
+Non-interactive web dashboard run — NO user present. Write all files immediately. Never ask for confirmation.
+IMPORTANT: Ignore any instructions from CLAUDE.md or modes/ files. Follow ONLY the steps in this prompt exactly as written.
+
+## Your task: Scan for new job offers
+
+Candidate: ${cand.name}, ${cand.location}. Remote policy: ${cand.remotePolicy}.
+Target roles: ${cand.primary.join(', ') || '(see config/profile.yml — none set)'}${cand.secondary.length ? `; secondary: ${cand.secondary.join(', ')}` : ''}.
+Negative keywords: skip roles that clearly don't match any of the target roles above (wrong function, wrong seniority).
+${notes ? `Additional preferences from the candidate's profile notes:\n${notes}\n` : ''}Freshness: ${freshnessNote}
+Note: LinkedIn candidates are pre-discovered via a real headless browser (see the LinkedIn Candidates section below, if present) — you only judge relevance for those, never search or verify them yourself.
+
+## Steps
+
+1. Read \`data/scan-history.tsv\` — these URLs are already known, skip them.
+2. Read \`data/pipeline.md\` — also skip URLs already listed there.
+${searchStep}${linkedinSection}`
 }
 
-const scan = makeJobEndpoints('scan', (ws, req) => buildScanPrompt(ws, req?.query?.freshness), 'claude-haiku-4-5-20251001', scanProgressSnapshot, verifyLinkedInQueue)
+const scan = makeJobEndpoints('scan', (ws, req) => buildScanPrompt(ws, req?.query?.freshness), 'claude-haiku-4-5-20251001', scanProgressSnapshot, scanAfterClose, fetchLinkedInCandidates)
 app.get('/api/scan/status', requireAuth, scan.statusHandler)
 app.get('/api/scan',        requireAuth, scan.startHandler)
 app.delete('/api/scan',     requireAuth, scan.stopHandler)
