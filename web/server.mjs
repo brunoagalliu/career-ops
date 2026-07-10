@@ -582,6 +582,50 @@ app.patch('/api/applications/:reportNumber/status', requireAuth, async (req, res
   }
 })
 
+const ARCHIVE_HEADER = '# Applications Tracker — Archive\n\n| # | Date | Company | Role | Score | Status | PDF | Report | Notes |\n|---|------|---------|------|-------|--------|-----|--------|-------|\n'
+const ARCHIVABLE_STATUSES = ['Evaluated', 'Applied', 'Responded', 'Interview', 'Offer', 'Rejected', 'Discarded', 'SKIP']
+
+// Moves rows matching the given statuses (default: Discarded + SKIP) out of
+// data/applications.md into data/applications-archive.md — reversible (the
+// rows aren't deleted, just relocated) since both files are plain markdown
+// tables in the same store.
+app.post('/api/applications/archive', requireAuth, async (req, res) => {
+  const requested = Array.isArray(req.body?.statuses) ? req.body.statuses.filter(s => ARCHIVABLE_STATUSES.includes(s)) : null
+  const statusesToArchive = requested?.length ? requested : ['Discarded', 'SKIP']
+
+  try {
+    const content = await getFile(req.user.id, 'data/applications.md')
+    if (!content) return res.status(404).json({ error: 'Tracker not found' })
+
+    const kept = []
+    const archivedRows = []
+    for (const line of content.split('\n')) {
+      const trimmed = line.trim()
+      const isDataRow = trimmed.startsWith('|') && !trimmed.startsWith('| #') && !trimmed.startsWith('|---') && !trimmed.startsWith('| ---')
+      if (isDataRow) {
+        const fields = trimmed.slice(1, -1).split('|').map(f => f.trim())
+        if (statusesToArchive.includes(normalizeStatus(fields[5] || ''))) {
+          archivedRows.push(line)
+          continue
+        }
+      }
+      kept.push(line)
+    }
+
+    if (archivedRows.length === 0) return res.json({ archived: 0 })
+
+    const existingArchive = await getFile(req.user.id, 'data/applications-archive.md')
+    const archiveContent = (existingArchive || ARCHIVE_HEADER).replace(/\n*$/, '\n') + archivedRows.join('\n') + '\n'
+
+    await saveFile(req.user.id, 'data/applications.md', kept.join('\n'))
+    await saveFile(req.user.id, 'data/applications-archive.md', archiveContent)
+
+    res.json({ archived: archivedRows.length })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 function getProfileYml(user) {
   if (user.profileYml) return user.profileYml
   // fallback: read from workspace file (migration path)

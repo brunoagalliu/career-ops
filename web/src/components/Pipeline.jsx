@@ -40,6 +40,7 @@ export default function Pipeline() {
   const [loading, setLoading]     = useState(true)
   const [sortBy, setSortBy]       = useState('status')
   const [sortDir, setSortDir]     = useState('asc')
+  const [archiving, setArchiving] = useState(false)
 
   useEffect(() => { loadData() }, [])
 
@@ -73,6 +74,24 @@ export default function Pipeline() {
     setMetrics(await mr.json())
   }
 
+  async function handleArchive() {
+    const count = (metrics?.byStatus?.Discarded || 0) + (metrics?.byStatus?.SKIP || 0)
+    if (count === 0) { alert('Nothing to archive — no Discarded or SKIP entries.'); return }
+    if (!confirm(`Archive ${count} Discarded/SKIP entries out of the main tracker? They're moved to data/applications-archive.md, not deleted — you can restore them later.`)) return
+    setArchiving(true)
+    try {
+      const res  = await authFetch('/api/applications/archive', { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok) { alert(data.error || 'Failed'); return }
+      alert(`Archived ${data.archived} entries.`)
+      await loadData()
+    } catch (e) {
+      alert(e.message)
+    } finally {
+      setArchiving(false)
+    }
+  }
+
   function toggleSort(col) {
     if (sortBy === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
     else { setSortBy(col); setSortDir('asc') }
@@ -95,7 +114,7 @@ export default function Pipeline() {
         {metrics && <Metrics metrics={metrics} />}
 
         {/* Filter pills */}
-        <div className="flex flex-wrap gap-1.5 mt-5 mb-4">
+        <div className="flex flex-wrap items-center gap-1.5 mt-5 mb-4">
           {FILTERS.map(f => {
             const count = f !== 'All' ? (metrics?.byStatus?.[f] || 0) : null
             return (
@@ -112,6 +131,14 @@ export default function Pipeline() {
               </button>
             )
           })}
+          <button
+            onClick={handleArchive}
+            disabled={archiving}
+            title="Move Discarded/SKIP entries out of the main tracker (reversible)"
+            className="ml-auto px-3 py-1 rounded-full text-xs font-medium border transition-colors text-zinc-500 border-zinc-800 hover:border-zinc-600 hover:text-zinc-300 disabled:opacity-50"
+          >
+            {archiving ? 'Archiving…' : '🗄 Archive old'}
+          </button>
         </div>
 
         {/* Table */}
