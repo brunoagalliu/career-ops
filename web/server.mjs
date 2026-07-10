@@ -821,6 +821,11 @@ function loadProfile(ws) {
   catch { return {} }
 }
 
+function loadPortals(ws) {
+  try { return yaml.load(fs.readFileSync(path.join(ws, 'portals.yml'), 'utf8')) || {} }
+  catch { return {} }
+}
+
 function loadProfileNotes(ws) {
   try {
     const raw = fs.readFileSync(path.join(ws, 'modes', '_profile.md'), 'utf8')
@@ -871,10 +876,23 @@ function buildScanPrompt(ws, freshness = 'week') {
   const cand = candidateSummary(profile)
   const notes = loadProfileNotes(ws)
 
-  const roleTerms = [...cand.primary, ...cand.secondary]
-  if (roleTerms.length === 0) roleTerms.push('open roles')
-  const boards = ['jobs.ashbyhq.com', 'boards.greenhouse.io', 'lever.co', 'weworkremotely.com', 'himalayas.app']
-  const queries = boards.map((board, i) => `site:${board} "${roleTerms[i % roleTerms.length]}" remote${dateFilter}`)
+  // Prefer the user's own portals.yml search_queries (configured + enabled in
+  // the Portals screen) over auto-generating queries — otherwise disabling a
+  // query there has no effect on what the scan actually searches.
+  const MAX_QUERIES = 10
+  const enabledQueries = (loadPortals(ws).search_queries || [])
+    .filter(q => q.enabled && q.query)
+    .slice(0, MAX_QUERIES)
+
+  let queries
+  if (enabledQueries.length > 0) {
+    queries = enabledQueries.map(q => `${q.query}${dateFilter}`)
+  } else {
+    const roleTerms = [...cand.primary, ...cand.secondary]
+    if (roleTerms.length === 0) roleTerms.push('open roles')
+    const boards = ['jobs.ashbyhq.com', 'boards.greenhouse.io', 'lever.co', 'weworkremotely.com', 'himalayas.app']
+    queries = boards.map((board, i) => `site:${board} "${roleTerms[i % roleTerms.length]}" remote${dateFilter}`)
+  }
 
   return `Today: ${today}. Working directory: ${ws}.
 Non-interactive web dashboard run — NO user present. Write all files immediately. Never ask for confirmation.
