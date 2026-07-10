@@ -11,6 +11,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends procps && \
 # Copy everything
 COPY . .
 
+# Install root dependencies (CLI scripts like merge-tracker.mjs run from here
+# via execFile/spawn, e.g. tracker-utils.mjs needs js-yaml). --ignore-scripts
+# skips the root package.json's own postinstall (redundant Playwright fetch —
+# the web/ install below already gets the browser this image actually uses).
+RUN npm install --ignore-scripts
+
 # Install web dependencies and build the frontend
 RUN npm install -g @anthropic-ai/claude-code && \
     cd web && npm install && npm run build
