@@ -10,6 +10,7 @@ import { randomUUID } from 'crypto'
 import pg from 'pg'
 import treeKill from 'tree-kill'
 import { chromium } from 'playwright'
+import { newLivenessPage, checkUrlLivenessWithFallback, sleep, jitteredDelayMs } from '../liveness-browser.mjs'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT       = path.resolve(__dirname, '..')
@@ -825,7 +826,7 @@ function makeJobEndpoints(name, buildPrompt, model = 'claude-sonnet-4-5', snapsh
         if (progressTimer) clearInterval(progressTimer)
         broadcast('status', `claude exited with code ${code}`)
         if (afterClose) {
-          try { await afterClose(ws, broadcast) } catch (e) { broadcast('error', `post-job: ${e.message}`) }
+          try { await afterClose(ws, broadcast, req) } catch (e) { broadcast('error', `post-job: ${e.message}`) }
         }
         try { await syncWorkspaceToDb(req.user.id) } catch {}
         state.done = true; state.exitCode = code ?? 0
@@ -905,11 +906,93 @@ function candidateSummary(profile) {
   }
 }
 
+function freshnessToDays(freshness) {
+  return { day: 1, week: 7, month: 30, any: 0 }[freshness] ?? 7
+}
+
+// Extracts LinkedIn's "N <unit> ago" posted-date text (e.g. "1 month ago"),
+// which WebFetch can't see (JS-rendered) but a real browser can. Returns an
+// approximate age in days, or null if no such text was found on the page.
+function parseLinkedInPostedAgeDays(bodyText) {
+  const m = bodyText.match(/\b(\d+)\s+(hour|day|week|month|year)s?\s+ago\b/i)
+  if (!m) return null
+  const perDay = { hour: 1 / 24, day: 1, week: 7, month: 30, year: 365 }
+  return parseInt(m[1], 10) * perDay[m[2].toLowerCase()]
+}
+
+// Runs after a scan job exits: opens a real headless browser (no LLM tool
+// call involved) against any newly-queued LinkedIn URLs to catch what
+// WebFetch structurally can't — JS-rendered content and the actual "posted
+// N days/months ago" freshness signal. Anything expired or older than the
+// scan's freshness window gets pulled out of the queue before pipeline ever
+// spends tokens evaluating it.
+async function verifyLinkedInQueue(ws, broadcast, req) {
+  const freshnessDays = freshnessToDays(req?.query?.freshness)
+  const pipelinePath  = path.join(ws, 'data', 'pipeline.md')
+  if (!fs.existsSync(pipelinePath)) return
+
+  const lines   = fs.readFileSync(pipelinePath, 'utf8').split('\n')
+  const MAX_CHECKS = 10
+  const targets = []
+  for (let i = 0; i < lines.length && targets.length < MAX_CHECKS; i++) {
+    const m = lines[i].match(/^(\s*)-\s\[\s\]\s+(\S+)/)
+    if (m && m[2].includes('linkedin.com')) targets.push({ index: i, url: m[2] })
+  }
+  if (targets.length === 0) return
+
+  broadcast('status', `Verifying ${targets.length} LinkedIn listing(s) with a headless browser…`)
+
+  let browser
+  try {
+    browser = await chromium.launch({ headless: true })
+  } catch (e) {
+    broadcast('error', `LinkedIn verify: browser launch failed: ${e.message}`)
+    return
+  }
+
+  const today       = new Date().toISOString().split('T')[0]
+  const historyPath = path.join(ws, 'data', 'scan-history.tsv')
+
+  try {
+    for (const { index, url } of targets) {
+      broadcast('status', `→ Verifying freshness: ${url}`)
+      try {
+        const page     = await newLivenessPage(browser)
+        const liveness = await checkUrlLivenessWithFallback(page, url)
+        const bodyText = await page.evaluate(() => document.body?.innerText ?? '').catch(() => '')
+        await page.close().catch(() => {})
+
+        const ageDays  = parseLinkedInPostedAgeDays(bodyText)
+        const isStale  = freshnessDays > 0 && ageDays !== null && ageDays > freshnessDays
+        const isExpired = liveness.result === 'expired'
+
+        if (isExpired || isStale) {
+          const reason = isExpired
+            ? `expired (${liveness.reason})`
+            : `stale — posted ~${Math.round(ageDays)}d ago, older than the ${freshnessDays}d freshness window`
+          lines[index] = lines[index].replace(/-\s\[\s\]/, '- [!]') + ` (auto-skip: ${reason})`
+          try { fs.appendFileSync(historyPath, `${url}\t\t\t${today}\n`) } catch {}
+          broadcast('status', `→ Removed (${reason}): ${url}`)
+        } else {
+          broadcast('status', `→ OK (${ageDays !== null ? `~${Math.round(ageDays)}d old` : 'age unknown'}): ${url}`)
+        }
+      } catch (e) {
+        broadcast('error', `LinkedIn verify failed for ${url}: ${e.message}`)
+      }
+      await sleep(jitteredDelayMs(1500))
+    }
+  } finally {
+    await browser.close().catch(() => {})
+  }
+
+  fs.writeFileSync(pipelinePath, lines.join('\n'), 'utf8')
+}
+
 // ── Scan ──────────────────────────────────────────────────────────────────────
 
 function buildScanPrompt(ws, freshness = 'week') {
   const today = new Date().toISOString().split('T')[0]
-  const cutoff = { day: 1, week: 7, month: 30, any: 0 }[freshness] || 7
+  const cutoff = freshnessToDays(freshness)
   const afterDate = cutoff > 0
     ? new Date(Date.now() - cutoff * 86400000).toISOString().split('T')[0]
     : null
@@ -973,7 +1056,7 @@ ${queries.map(q => `   - ${q}`).join('\n')}
 Print "→ Searching: [query]" before each WebSearch.`
 }
 
-const scan = makeJobEndpoints('scan', (ws, req) => buildScanPrompt(ws, req?.query?.freshness), 'claude-haiku-4-5-20251001', scanProgressSnapshot)
+const scan = makeJobEndpoints('scan', (ws, req) => buildScanPrompt(ws, req?.query?.freshness), 'claude-haiku-4-5-20251001', scanProgressSnapshot, verifyLinkedInQueue)
 app.get('/api/scan/status', requireAuth, scan.statusHandler)
 app.get('/api/scan',        requireAuth, scan.startHandler)
 app.delete('/api/scan',     requireAuth, scan.stopHandler)
