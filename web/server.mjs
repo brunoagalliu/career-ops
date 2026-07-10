@@ -626,6 +626,45 @@ app.post('/api/applications/archive', requireAuth, async (req, res) => {
   }
 })
 
+app.get('/api/applications/archive', requireAuth, async (req, res) => {
+  try {
+    const content = await getFile(req.user.id, 'data/applications-archive.md')
+    res.json(content ? parseApplicationsContent(content) : [])
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// Moves a single row back from the archive into the main tracker, appended
+// at the end (undoes what /api/applications/archive did for that row).
+app.post('/api/applications/archive/:reportNumber/restore', requireAuth, async (req, res) => {
+  const { reportNumber } = req.params
+  try {
+    const archiveContent = await getFile(req.user.id, 'data/applications-archive.md')
+    if (!archiveContent) return res.status(404).json({ error: 'Archive not found' })
+
+    let restoredLine = null
+    const remainingLines = []
+    for (const line of archiveContent.split('\n')) {
+      if (restoredLine === null && line.includes(`[${reportNumber}](`)) {
+        restoredLine = line
+        continue
+      }
+      remainingLines.push(line)
+    }
+    if (restoredLine === null) return res.status(404).json({ error: `Application ${reportNumber} not found in archive` })
+
+    const trackerContent = (await getFile(req.user.id, 'data/applications.md')) || ''
+    const updatedTracker = trackerContent.replace(/\n*$/, '\n') + restoredLine + '\n'
+
+    await saveFile(req.user.id, 'data/applications.md', updatedTracker)
+    await saveFile(req.user.id, 'data/applications-archive.md', remainingLines.join('\n'))
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 function getProfileYml(user) {
   if (user.profileYml) return user.profileYml
   // fallback: read from workspace file (migration path)

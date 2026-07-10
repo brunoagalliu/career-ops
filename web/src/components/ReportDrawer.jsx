@@ -22,7 +22,7 @@ function scoreColor(score) {
   return 'text-rose-400'
 }
 
-export default function ReportDrawer({ app, onClose, onStatusUpdate }) {
+export default function ReportDrawer({ app, onClose, onStatusUpdate, archived = false, onRestore }) {
   const [content, setContent]       = useState(null)
   const [loading, setLoading]       = useState(true)
   const [updating, setUpdating]     = useState(false)
@@ -126,16 +126,25 @@ export default function ReportDrawer({ app, onClose, onStatusUpdate }) {
                 : '✦'} Apply Pack
             </button>
           )}
-          <select
-            value={app.status}
-            onChange={e => handleStatusChange(e.target.value)}
-            disabled={updating || !app.reportNumber}
-            className="text-xs bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-zinc-300 focus:outline-none focus:border-zinc-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {STATUS_OPTIONS.map(s => (
-              <option key={s} value={s}>{s}</option>
-            ))}
-          </select>
+          {archived ? (
+            <button
+              onClick={() => onRestore?.(app)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors bg-emerald-600/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-600/30 hover:border-emerald-400/60"
+            >
+              ↩ Restore
+            </button>
+          ) : (
+            <select
+              value={app.status}
+              onChange={e => handleStatusChange(e.target.value)}
+              disabled={updating || !app.reportNumber}
+              className="text-xs bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-zinc-300 focus:outline-none focus:border-zinc-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {STATUS_OPTIONS.map(s => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </select>
+          )}
         </div>
       </div>
 

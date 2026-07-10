@@ -41,20 +41,48 @@ export default function Pipeline() {
   const [sortBy, setSortBy]       = useState('status')
   const [sortDir, setSortDir]     = useState('asc')
   const [archiving, setArchiving] = useState(false)
+  const [viewingArchive, setViewingArchive] = useState(false)
 
-  useEffect(() => { loadData() }, [])
+  useEffect(() => { loadData(viewingArchive) }, [])
 
-  async function loadData() {
+  async function loadData(archiveMode = viewingArchive) {
     setLoading(true)
     try {
-      const [ar, mr] = await Promise.all([
-        authFetch('/api/applications'),
-        authFetch('/api/metrics'),
-      ])
-      setApps(await ar.json())
-      setMetrics(await mr.json())
+      if (archiveMode) {
+        const ar = await authFetch('/api/applications/archive')
+        setApps(await ar.json())
+        setMetrics(null)
+      } else {
+        const [ar, mr] = await Promise.all([
+          authFetch('/api/applications'),
+          authFetch('/api/metrics'),
+        ])
+        setApps(await ar.json())
+        setMetrics(await mr.json())
+      }
     } finally {
       setLoading(false)
+    }
+  }
+
+  function toggleArchiveView() {
+    const next = !viewingArchive
+    setViewingArchive(next)
+    setSelected(null)
+    setFilter('All')
+    loadData(next)
+  }
+
+  async function handleRestore(app) {
+    if (!confirm(`Restore "${app.company} — ${app.role}" back to the main tracker?`)) return
+    try {
+      const res  = await authFetch(`/api/applications/archive/${app.reportNumber}/restore`, { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok) { alert(data.error || 'Failed'); return }
+      setApps(prev => prev.filter(a => a.reportNumber !== app.reportNumber))
+      setSelected(null)
+    } catch (e) {
+      alert(e.message)
     }
   }
 
@@ -97,6 +125,8 @@ export default function Pipeline() {
     else { setSortBy(col); setSortDir('asc') }
   }
 
+  const statusCounts = apps.reduce((acc, a) => { acc[a.status] = (acc[a.status] || 0) + 1; return acc }, {})
+
   const visible = apps
     .filter(a => filter === 'All' || a.status === filter)
     .sort((a, b) => {
@@ -113,10 +143,17 @@ export default function Pipeline() {
       <div className={`flex-1 min-w-0 ${selectedApp ? 'hidden lg:block' : ''}`}>
         {metrics && <Metrics metrics={metrics} />}
 
+        {viewingArchive && (
+          <div className="mt-5 px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-xs text-zinc-500">
+            Viewing archived entries — click one to restore it, or {' '}
+            <button onClick={toggleArchiveView} className="text-zinc-300 underline hover:text-zinc-100">go back to the active tracker</button>.
+          </div>
+        )}
+
         {/* Filter pills */}
-        <div className="flex flex-wrap items-center gap-1.5 mt-5 mb-4">
+        <div className={`flex flex-wrap items-center gap-1.5 mb-4 ${viewingArchive ? 'mt-3' : 'mt-5'}`}>
           {FILTERS.map(f => {
-            const count = f !== 'All' ? (metrics?.byStatus?.[f] || 0) : null
+            const count = f !== 'All' ? (statusCounts[f] || 0) : null
             return (
               <button
                 key={f}
@@ -132,13 +169,21 @@ export default function Pipeline() {
             )
           })}
           <button
-            onClick={handleArchive}
-            disabled={archiving}
-            title="Move Discarded/SKIP entries out of the main tracker (reversible)"
-            className="ml-auto px-3 py-1 rounded-full text-xs font-medium border transition-colors text-zinc-500 border-zinc-800 hover:border-zinc-600 hover:text-zinc-300 disabled:opacity-50"
+            onClick={toggleArchiveView}
+            className="ml-auto px-3 py-1 rounded-full text-xs font-medium border transition-colors text-zinc-500 border-zinc-800 hover:border-zinc-600 hover:text-zinc-300"
           >
-            {archiving ? 'Archiving…' : '🗄 Archive old'}
+            {viewingArchive ? '← Active tracker' : '🗄 View archive'}
           </button>
+          {!viewingArchive && (
+            <button
+              onClick={handleArchive}
+              disabled={archiving}
+              title="Move Discarded/SKIP entries out of the main tracker (reversible)"
+              className="px-3 py-1 rounded-full text-xs font-medium border transition-colors text-zinc-500 border-zinc-800 hover:border-zinc-600 hover:text-zinc-300 disabled:opacity-50"
+            >
+              {archiving ? 'Archiving…' : '🗄 Archive old'}
+            </button>
+          )}
         </div>
 
         {/* Table */}
@@ -228,8 +273,10 @@ export default function Pipeline() {
       {selectedApp && (
         <ReportDrawer
           app={selectedApp}
+          archived={viewingArchive}
           onClose={() => setSelected(null)}
           onStatusUpdate={handleStatusUpdate}
+          onRestore={handleRestore}
         />
       )}
     </div>
